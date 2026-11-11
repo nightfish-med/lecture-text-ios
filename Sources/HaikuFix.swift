@@ -136,6 +136,17 @@ enum BatchPlanner {
         due(unsentChars: unsent.reduce(0) { $0 + $1.text.count }, now: now, lastSent: lastSent)
     }
 
+    /// v0.24 即時模式 2、3：每 60 秒一批；新字 ≥600 立刻送；新字 <20 先不送；最多等 90 秒
+    static let bigEvery = 60.0, bigMaxChars = 600, bigMaxWait = 90.0
+
+    static func due(unsentChars: Int, now: Double, lastSent: Double, big: Bool) -> Bool {
+        guard big else { return due(unsentChars: unsentChars, now: now, lastSent: lastSent) }
+        if unsentChars <= 0 { return false }
+        if unsentChars >= bigMaxChars { return true }
+        if now - lastSent >= bigEvery && unsentChars >= minChars { return true }
+        return now - lastSent >= bigMaxWait
+    }
+
     /// 前文：這些單位接起來的最後 300 字，不帶編號
     static func context(_ before: [LiveUnit]) -> String {
         String(before.map(\.text).joined().suffix(contextChars))
@@ -164,6 +175,8 @@ struct ReviewBatch: Codable, Equatable {
     var chatter: Bool? = nil
     var slidePage: Int? = nil
     var pageEvidence: String? = nil
+    /// v0.24：附了幾個 Whisper 字（nil＝這場沒跑 Whisper）
+    var whisperChars: Int? = nil
 
     enum State: String, Codable { case pending, sending, done, failed, abandoned }
 }

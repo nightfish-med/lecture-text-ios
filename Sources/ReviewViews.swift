@@ -66,6 +66,16 @@ struct HaikuMenu: View {
                     Text(line)
                 }
             }
+            // v0.24：即時模式（下一次錄音生效）
+            Section("即時模式（下一次錄音生效；畫面都只顯示 Apple＋綠字；Whisper 要先下載過模型）") {
+                Picker(selection: Binding(get: { model.liveMode }, set: { model.liveMode = $0 })) {
+                    ForEach(0..<AppModel.liveModeNames.count, id: \.self) { i in
+                        Text(AppModel.liveModeNames[i]).tag(i)
+                    }
+                } label: {
+                    Label("即時模式：\(AppModel.liveModeNames[min(max(model.liveMode, 0), 2)])", systemImage: "dial.medium")
+                }
+            }
             // v0.23.4：實驗模式（Apple 現用／Apple 聽寫＋關鍵字／Whisper 同一個錄音檔各轉一次）
             Section {
                 Button {

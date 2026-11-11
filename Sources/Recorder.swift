@@ -43,6 +43,8 @@ final class AudioPump: @unchecked Sendable {
     private let onEvent: (String) -> Void
     /// v0.20：寫檔第一次失敗的原因（例如空間滿）；以前吞掉不講。
     private var writeError: String?
+    /// v0.24：即時模式 2（錄音中跑 Whisper）時，存檔那份聲音也抄一份給它；nil＝不抄
+    var tap: SampleTap?
 
     var seconds: Double {
         lock.lock()
@@ -236,6 +238,7 @@ final class AudioPump: @unchecked Sendable {
             do {
                 try file.write(from: converted)
                 framesWritten += AVAudioFramePosition(converted.frameLength)
+                tap?.append(converted)
             } catch {
                 // 寫檔失敗（例如空間滿）也不要停掉字幕；v0.20 起記第一次的原因
                 if writeError == nil {
@@ -367,7 +370,8 @@ final class LiveSession {
         onFinal: @escaping @MainActor ([TimedPiece]) -> Void,
         onVolatile: @escaping @MainActor (String) -> Void,
         onError: @escaping @MainActor (String) -> Void,
-        onEvent: @escaping @MainActor (String) -> Void
+        onEvent: @escaping @MainActor (String) -> Void,
+        tap: SampleTap? = nil
     ) async throws -> LiveSession {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw RecorderError.microphoneDenied
@@ -410,6 +414,7 @@ final class LiveSession {
             }
         }
         do {
+            pump.tap = tap
             try pump.start()        // 先收音，引擎晚一點開始也不會掉字
             try await analyzer.start(inputSequence: stream)
         } catch {

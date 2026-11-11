@@ -114,6 +114,14 @@ final class AppModel {
     var fixMode: Int = UserDefaults.standard.integer(forKey: "fixMode") {
         didSet { UserDefaults.standard.set(fixMode, forKey: "fixMode") }
     }
+    /// v0.24 即時模式（下一次錄音生效）。0＝Apple＋Haiku 15 秒一批（原本）；1＝Apple＋Whisper 同時跑，Haiku 60 秒一批看兩份；
+    /// 2＝Apple＋Haiku 60 秒一批（不跑 Whisper，對照用）。畫面都只顯示 Apple＋Haiku 綠字。
+    var liveMode: Int = UserDefaults.standard.integer(forKey: "liveMode") {
+        didSet { UserDefaults.standard.set(liveMode, forKey: "liveMode") }
+    }
+    static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Apple＋Whisper＋Haiku（60 秒一批，看兩份）", "Apple＋Haiku（60 秒一批，對照用）"]
+    /// v0.24：這場錄音中的 Whisper（模式 1 才有）
+    private(set) var liveWhisper: LiveWhisper?
     var speakerModeLabel: String {
         switch speakerMode {
         case 0: return "單人"
@@ -399,6 +407,16 @@ final class AppModel {
                 } else {
                     log("開始錄音；\(liveInfo ?? "")")
                 }
+                // v0.24 即時模式 1：錄音中同時跑 Whisper（存檔那份聲音抄一份給它）
+                liveWhisper?.cancel()
+                liveWhisper = nil
+                if liveMode == 1, let current = run {
+                    let path = Store.reviewFile(of: current).path.replacingOccurrences(of: " 改字.json", with: " Whisper即時.txt")
+                    let lw = LiveWhisper(offset: continuing?.offset ?? 0, saveTo: URL(fileURLWithPath: path))
+                    lw.start()
+                    liveWhisper = lw
+                }
+                log("即時模式：\(Self.liveModeNames[min(max(liveMode, 0), 2)])")
                 // v0.23.2：條件都符合（金鑰、課名、這門課開著、不是私人課程）才建審稿器；否則和 v0.22 一樣
                 startReviewer(course: nil)
                 UIApplication.shared.isIdleTimerDisabled = true
@@ -424,7 +442,8 @@ final class AppModel {
                     },
                     onEvent: { [weak self] line in
                         self?.log(line)
-                    }
+                    },
+                    tap: liveWhisper?.tap
                 )
                 phase = .recording
                 startWatch()
@@ -432,6 +451,8 @@ final class AppModel {
                 UIApplication.shared.isIdleTimerDisabled = false
                 reviewer?.close()
                 reviewer = nil
+                liveWhisper?.cancel()
+                liveWhisper = nil
                 let message = error.localizedDescription
                 log("\(continuing == nil ? "錄音" : "續錄")開不起來：\(message)", toRun: false)
                 if let base = continuing?.base {
@@ -463,6 +484,15 @@ final class AppModel {
         stopWatch()
         job = Task {
             let seconds = await session.finish()
+            // v0.24：Whisper 把剩下的聲音轉完（Haiku 最後幾批會等它，最多 40 秒）；90 秒後一定收掉，免得和下課 Whisper 同時佔記憶體
+            if let lw = liveWhisper {
+                lw.end()
+                Task { @MainActor [weak self] in
+                    try? await Task.sleep(for: .seconds(90))
+                    lw.cancel()
+                    if let self, self.liveWhisper === lw { self.log(lw.note) }
+                }
+            }
             // v0.23.2：停止餵字 → 還沒送的批補送，和整段重轉同時開始；包在背景時間裡最多等 60 秒（規格 A④）
             let review = reviewer
             var flush: Task<Int, Never>?
@@ -1385,6 +1415,7 @@ final class AppModel {
             clock: { [weak self] in self?.recordingSeconds ?? 0 },
             onEvent: { [weak self] line in self?.log(line) }
         )
+        review.configure(bigBatch: liveMode != 0, whisper: liveMode == 1 ? liveWhisper : nil)
         review.start()
         reviewer = review
         // 投影片檔名可能有人名，紀錄只寫頁數
@@ -1423,6 +1454,7 @@ final class AppModel {
     /// 錄音畫面標題下那一行
     var reviewStatusLine: String {
         ReviewText.slides(reviewer?.deckName ?? sessionSlides) + "　" + (reviewer?.statusLine ?? ReviewText.closed(reviewOffReason))
+            + (liveWhisper.map { "　" + $0.note } ?? "")
     }
 
     private func beginReviewBackground() {

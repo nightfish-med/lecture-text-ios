@@ -32,6 +32,13 @@ final class LiveReviewer {
     private let courseBlock: String
     private let table: [LiveFixRule]
     private let pool: TermPool
+    private let pages: [String]
+    private let glossary: [LiveFixRule]
+    /// v0.24 即時模式：true＝60 秒一批（模式 2、3）
+    @ObservationIgnored private(set) var bigBatch = false
+    /// v0.24 即時模式 2：錄音中的 Whisper（nil＝沒跑）
+    @ObservationIgnored private(set) var whisper: LiveWhisper?
+    @ObservationIgnored private var whisperWait: [Int: Date] = [:]
     private let file: URL
     private let clock: @MainActor () -> Double
     private let onEvent: @MainActor (String) -> Void
@@ -63,6 +70,8 @@ final class LiveReviewer {
         let pages = deck.map { Array($0.pages.prefix(HaikuPrompt.slidePagesSent($0))) } ?? []
         // 0.23.3：詞池只放投影片和這門課的對照表，不放每門課都套的字形表（11/11 真機：上麵→上面 讓「自然麵→上面」憑「詞表」通過）
         self.pool = TermPool(pages: pages, glossary: LiveFix.byCourse[course] ?? [])
+        self.pages = pages
+        self.glossary = LiveFix.byCourse[course] ?? []
         self.file = file
         self.clock = clock
         self.onEvent = onEvent
@@ -85,6 +94,12 @@ final class LiveReviewer {
         self.nextBatchID = (start.batches.map(\.id).max() ?? 0) + 1
         self.lastPlanned = now
         self.lastAudio = now
+    }
+
+    /// v0.24：即時模式（start 前叫）
+    func configure(bigBatch: Bool, whisper: LiveWhisper?) {
+        self.bigBatch = bigBatch
+        self.whisper = whisper
     }
 
     // MARK: 開始、關掉
@@ -187,7 +202,7 @@ final class LiveReviewer {
         if stop == nil {
             let unsent = splitter.unsent
             if feeding {
-                if BatchPlanner.due(unsent: unsent, now: now, lastSent: lastPlanned) {
+                if BatchPlanner.due(unsentChars: unsent.reduce(0) { $0 + $1.text.count }, now: now, lastSent: lastPlanned, big: bigBatch) {
                     plan(unsent, now: now)
                 }
             } else if !unsent.isEmpty {
@@ -229,11 +244,23 @@ final class LiveReviewer {
             log.batches[index] = batch
             return
         }
+        // v0.24 模式 2：等 Whisper 轉到這批的結尾（最多 40 秒），再把同一段的 Whisper 稿附上
+        var reference = ""
+        if let whisper {
+            if whisper.covered < batch.audioEnd - 0.5, !whisper.finished {
+                let since = whisperWait[batch.id] ?? Date()
+                whisperWait[batch.id] = since
+                if Date().timeIntervalSince(since) < LiveWhisper.waitSeconds { return }
+            }
+            whisperWait[batch.id] = nil
+            reference = whisper.text(from: batch.audioStart, to: batch.audioEnd)
+            batch.whisperChars = reference.count
+        }
         batch.attempts += 1
         batch.state = .sending
         log.batches[index] = batch
         inFlight = true
-        let message = HaikuPrompt.userMessage(context: batch.context, units: units)
+        let message = HaikuPrompt.userMessage(context: batch.context, units: units) + LiveWhisper.referenceBlock(reference)
         let block = courseBlock
         let apiKey = key
         let id = batch.id
@@ -244,13 +271,13 @@ final class LiveReviewer {
                 }
                 return await HaikuClient.send(body: body, key: apiKey)
             }.value
-            await self.handle(outcome, batchID: id, units: units)
+            await self.handle(outcome, batchID: id, units: units, reference: reference)
         }
     }
 
     // MARK: 回來之後
 
-    private func handle(_ outcome: HaikuOutcome, batchID: Int, units: [LiveUnit]) async {
+    private func handle(_ outcome: HaikuOutcome, batchID: Int, units: [LiveUnit], reference: String = "") async {
         defer {
             inFlight = false
             save()
@@ -279,7 +306,8 @@ final class LiveReviewer {
             let snapshot = state
             let off = Set(log.off)
             let sessionText = splitter.units.map(\.text).joined()
-            let pool = self.pool
+            // v0.24：附了 Whisper 稿的批，Whisper 的字也算證據（改成的字要在投影片、詞表或 Whisper 裡找得到）
+            let pool = reference.isEmpty ? self.pool : TermPool(pages: pages + [reference], glossary: glossary)
             let table = self.table
             let parsed = await Task.detached { () -> ReviewParsed in
                 let result = HaikuPrompt.parseResponse(data)

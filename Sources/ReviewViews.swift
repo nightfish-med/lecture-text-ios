@@ -58,7 +58,7 @@ struct HaikuMenu: View {
             // v0.23.2：自動上傳測試資料（Google 雲端硬碟「轉文字App測試資料」；錄音不傳、私人課程不傳）
             DriveItems(drive: model.drive)
             // v0.23.5：按停止後用 Whisper 在裝置上再轉一份（預設關）。小字寫說明；有待轉、轉換中、上次結果就多一行
-            Section("裝置上跑、不上傳；約錄音長度的 1/10；第一次下載約 600 MB（要 Wi-Fi）") {
+            Section("裝置上跑、不上傳；約錄音長度的 1/10，轉換中螢幕不自動鎖；第一次下載約 600 MB（要 Wi-Fi）") {
                 Toggle(isOn: Binding(get: { model.whisper.enabled }, set: { model.whisper.enabled = $0 })) {
                     Label("下課後用 Whisper 再轉一份", systemImage: "waveform")
                 }

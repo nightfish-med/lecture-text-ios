@@ -35,13 +35,15 @@ struct LabSheet: View {
                         .foregroundStyle(.secondary)
                     // v0.23.5：已知失靈，預設關
                     Toggle("Apple 聽寫＋關鍵字（已知失靈：實測只出 2 字）", isOn: $lab.useDictation)
-                    Toggle("Whisper large-v3 turbo", isOn: $lab.useWhisper)
-                    Toggle("Whisper 加關鍵字提示詞（鬼打牆可能變多）", isOn: $lab.whisperPrompt)
+                    Toggle("Whisper（整檔）", isOn: $lab.useWhisper)
+                    Toggle("Whisper（整檔）加關鍵字提示詞（鬼打牆可能變多）", isOn: $lab.whisperPrompt)
                         .disabled(!lab.useWhisper)
+                    // v0.23.5：照電腦版人聲偵測切句、每句單獨送 Whisper，算錄音中邊錄邊轉會落後多少
+                    Toggle("Whisper 切句（照電腦版，模擬邊錄邊轉）", isOn: $lab.useWhisperLive)
                 } header: {
                     Text("要跑的引擎（一個跑完再跑下一個）")
                 } footer: {
-                    Text("Whisper 第一次要下載約 600 MB 模型（用 Wi-Fi），之後不用。iPad 實測：46 分鐘的錄音 Apple 約 1 分鐘、Whisper 約 4–5 分鐘。Whisper 的轉換時間從模型載入完才算，載入另列。字數不到 Apple 現用 10% 的寫「疑似失敗」。跑的時候螢幕不要關、不要切走。")
+                    Text("Whisper 第一次要下載約 600 MB 模型（用 Wi-Fi），之後不用；切句第一次另外下載人聲偵測模型（很小）。iPad 實測：46 分鐘的錄音 Apple 約 1 分鐘、Whisper 整檔約 4–5 分鐘；切句每句單獨送，還沒實測，估計比整檔慢（約 5–15 分鐘）。Whisper 的轉換時間從模型載入完才算，載入另列。字數不到 Apple 現用 10% 的寫「疑似失敗」。跑的時候螢幕不要關、不要切走。")
                 }
                 Section {
                     if lab.running {

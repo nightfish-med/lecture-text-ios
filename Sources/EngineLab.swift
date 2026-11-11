@@ -15,18 +15,21 @@ import WhisperKit
 // v0.23.5：Apple 聽寫預設關（實測一份課堂錄音，0 或 100 個關鍵字都只出「多少？」兩字）；Whisper 提示詞改成開關、預設關
 // （實測加提示詞鬼打牆約 970 字、不加約 226 字，各一次樣本）；Whisper 計時從模型載入完才算，載入另列；
 // 字數不到 Apple 現用 10% 的寫「疑似失敗」。Whisper 呼叫和下課轉檔共用 WhisperRunner.swift。
+// v0.23.5：多一個引擎「Whisper 切句（照電腦版，模擬邊錄邊轉）」，預設開：人聲偵測切句、每句單獨送 Whisper，
+// 量錄音中邊錄邊轉會落後多少、鬼打牆多少（LiveCutRunner.swift、LiveCutPlan.swift）。原本的 Whisper 改叫「Whisper（整檔）」。
 
 @MainActor
 @Observable
 final class EngineLab {
     enum Engine: String, CaseIterable, Identifiable {
-        case apple, dictation, whisper
+        case apple, dictation, whisper, whisperLive
         var id: String { rawValue }
         var name: String {
             switch self {
             case .apple: return "Apple 現用"
             case .dictation: return "Apple 聽寫＋關鍵字"
-            case .whisper: return "Whisper"
+            case .whisper: return "Whisper（整檔）"
+            case .whisperLive: return "Whisper 切句"
             }
         }
         var file: String {
@@ -34,6 +37,7 @@ final class EngineLab {
             case .apple: return "1_Apple現用"
             case .dictation: return "2_Apple聽寫加關鍵字"
             case .whisper: return "3_Whisper"
+            case .whisperLive: return "4_Whisper切句"
             }
         }
     }
@@ -53,6 +57,8 @@ final class EngineLab {
     /// v0.23.5：已知失靈（實測一份課堂錄音只出 2 字），預設關
     var useDictation = false
     var useWhisper = true
+    /// v0.23.5：Whisper 切句（照電腦版，模擬邊錄邊轉），預設開
+    var useWhisperLive = true
     /// v0.23.5：Whisper 加關鍵字提示詞，預設關（加了鬼打牆比較多）
     var whisperPrompt = false
     /// v0.23.5：開始／結束時通知 AppModel（實驗模式跑 Whisper 時，下課 Whisper 要讓開，兩個模型同時載入記憶體不夠）
@@ -104,6 +110,7 @@ final class EngineLab {
         var engines: [Engine] = [.apple]
         if useDictation { engines.append(.dictation) }
         if useWhisper { engines.append(.whisper) }
+        if useWhisperLive { engines.append(.whisperLive) }
         rows = engines.map { Row(id: $0, text: "等待") }
         report = nil
         reportURL = nil
@@ -152,6 +159,7 @@ final class EngineLab {
             var started = clock.now
             var seconds: Double? { started.duration(to: clock.now).seconds }
             var loadSeconds: Double?
+            var live: LiveCutSummary?
             do {
                 let detail: String
                 switch engine {
@@ -198,15 +206,53 @@ final class EngineLab {
                     await loaded.pipe.unloadModels()
                     collected = WhisperText.spaced(collected)
                     detail = "WhisperKit \(WhisperPlan.model)，語言 zh，每 5 分鐘一窗（切在最安靜處）、窗內 VAD 切段，"
-                        + (prompt == nil ? "沒有提示詞" : "提示詞放前 60 個關鍵字") + "，簡轉繁"
+                        + (prompt == nil ? "沒有提示詞" : "提示詞放前 60 個關鍵字") + "，簡轉繁；沒有過濾鬼打牆"
+                case .whisperLive:
+                    // 1. 人聲偵測（先做完、放掉偵測模型，再載 Whisper，記憶體才夠）
+                    let detection = try await LiveCutRunner.detect(url: readable) { [weak self] state in
+                        self?.set(.whisperLive, state)
+                    }
+                    try Task.checkCancellation()
+                    // 2. 載入 Whisper（另計），載入完才開始算轉換時間
+                    let loaded = try await WhisperRunner.load { [weak self] state in
+                        self?.set(.whisperLive, state)
+                    }
+                    loadSeconds = loaded.seconds
+                    UIDevice.current.isBatteryMonitoringEnabled = true
+                    let batteryStart = Self.battery()
+                    started = clock.now
+                    let outcome: LiveCutRunner.Outcome
+                    do {
+                        outcome = try await LiveCutRunner.transcribe(loaded.pipe, url: readable, detection: detection, audioSeconds: audioSeconds) { [weak self] index, count, at in
+                            self?.set(.whisperLive, "第 \(index + 1)／\(count) 句（錄音 \(LabReport.clock(at))）")
+                        }
+                    } catch {
+                        await loaded.pipe.unloadModels()
+                        UIDevice.current.isBatteryMonitoringEnabled = false
+                        throw error
+                    }
+                    await loaded.pipe.unloadModels()
+                    var summary = outcome.summary
+                    summary.batteryStart = batteryStart
+                    summary.batteryEnd = Self.battery()
+                    UIDevice.current.isBatteryMonitoringEnabled = false
+                    live = summary
+                    collected = WhisperText.spaced(outcome.pieces)
+                    detail = "WhisperKit \(WhisperPlan.model)，語言 zh，人聲偵測切句（照電腦版 engine.py）、每句單獨送，"
+                        + "每句 token 上限 16＋每秒 15（最多 224），沒有提示詞，每句過濾鬼打牆，簡轉繁；人聲偵測：\(summary.detector)"
+                        + (summary.stoppedAt.map { "；被停在第 \($0) 句" } ?? "")
                 }
                 let pieces = collected
                 let text = TextCleanup.fix(pieces.map(\.text).joined())
                 let took = seconds
                 // 第一個是 Apple 現用（對照組）：別的引擎字數不到它的 10% 就寫「疑似失敗」
                 let baseline = results.first.flatMap { $0.error == nil ? LabMetrics.normalize($0.text).count : nil }
-                results.append(LabResult(name: engine.name, note: detail, pieces: pieces, text: text, seconds: took, error: nil, loadSeconds: loadSeconds))
-                set(engine, LabReport.rowStatus(seconds: took ?? 0, load: loadSeconds, chars: LabMetrics.normalize(text).count, baseline: baseline))
+                results.append(LabResult(name: engine.name, note: detail, pieces: pieces, text: text, seconds: took, error: nil, loadSeconds: loadSeconds, live: live))
+                var status = LabReport.rowStatus(seconds: took ?? 0, load: loadSeconds, chars: LabMetrics.normalize(text).count, baseline: baseline)
+                if let live {
+                    status += "，\(live.sentences.count) 句" + (live.stoppedAt != nil ? "（已停止，只跑一部分）" : "")
+                }
+                set(engine, status)
             } catch {
                 let message = Task.isCancelled ? "已停止" : error.localizedDescription
                 results.append(LabResult(name: engine.name, note: "", pieces: [], text: "", seconds: nil, error: message))
@@ -235,11 +281,26 @@ final class EngineLab {
             if let data = try? JSONEncoder().encode(r.pieces) {
                 try? data.write(to: folder.appendingPathComponent(engine.file + "_時間.json"))
             }
+            // v0.23.5：切句的每句起訖、運算秒數、字數（報告的數字都能從這裡重算）
+            if let live = r.live {
+                let encoder = JSONEncoder()
+                encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+                if let data = try? encoder.encode(live) {
+                    try? data.write(to: folder.appendingPathComponent(engine.file + "_每句.json"))
+                }
+            }
         }
         report = markdown
         reportURL = folder.appendingPathComponent("報告.md")
         folderName = folderTitle
         note = nil
+    }
+
+    /// 電量（實驗模式切句用；isBatteryMonitoringEnabled 要先開）
+    static func battery() -> String {
+        let device = UIDevice.current
+        let charging = device.batteryState == .charging || device.batteryState == .full
+        return WhisperPlan.batteryText(level: device.batteryLevel, charging: charging)
     }
 
     // MARK: 引擎 2：Apple DictationTranscriber＋關鍵字

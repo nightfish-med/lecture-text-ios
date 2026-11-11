@@ -164,6 +164,8 @@ final class WhisperAfter {
 
     private func runQueue() async {
         beginBackground()
+        // 轉換中螢幕不自動鎖（和實驗模式、定稿一樣），一次轉完；按電源鍵或闔上還是會暫停
+        UIApplication.shared.isIdleTimerDisabled = true
         UIDevice.current.isBatteryMonitoringEnabled = true
         let sampler = Task { [weak self] in
             while !Task.isCancelled {
@@ -190,6 +192,8 @@ final class WhisperAfter {
         job = nil
         marker = nil
         UIDevice.current.isBatteryMonitoringEnabled = false
+        // 被開始錄音、定稿叫停時不還原：那邊自己設了不鎖，這裡改回去會讓錄音中螢幕自動鎖
+        if canRun() { UIApplication.shared.isIdleTimerDisabled = false }
         endBackground()
         task = nil
         refreshStatus()

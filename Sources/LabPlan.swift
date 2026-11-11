@@ -140,6 +140,8 @@ struct LabResult {
     let error: String?
     /// v0.23.5：載入模型花幾秒（Whisper 才有；seconds 不含這段）
     var loadSeconds: Double? = nil
+    /// v0.23.5：「Whisper 切句（模擬邊錄邊轉）」的每句數字（別的引擎沒有）
+    var live: LiveCutSummary? = nil
 }
 
 enum LabReport {
@@ -219,6 +221,13 @@ enum LabReport {
                 for i in rows {
                     lines.append("| \(keywords[i]) | " + all.map { "\($0[i])" }.joined(separator: " | ") + " |")
                 }
+            }
+        }
+        // v0.23.5：Whisper 切句的落後、每句長度與運算、鬼打牆、熱度電量
+        for r in results where r.error == nil {
+            if let live = r.live {
+                lines.append("")
+                lines += LiveCutReport.section(live)
             }
         }
         lines.append("")

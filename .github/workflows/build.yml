@@ -53,8 +53,11 @@ jobs:
           xcodebuild -version > out/xcode.txt
           xcodebuild -showsdks | grep -i iphoneos >> out/xcode.txt
           brew install xcodegen
-          sed -i '' 's/CFBundleVersion: .*/CFBundleVersion: "${{ github.run_number }}"/' project.yml
-          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.23.5"/' project.yml
+          # 公開倉庫從 1 重新數；加 41 接在舊倉庫 build 41 後面，裝的時候版本不會倒退
+          BN=$(( ${{ github.run_number }} + 41 ))
+          echo "$BN" > out/build_number.txt
+          sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$BN\"/" project.yml
+          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.23.6"/' project.yml
           xcodegen generate
       - name: 先抓套件（GitHub 下載偶爾回 504，失敗等 30 秒重試）
         shell: bash
@@ -122,7 +125,7 @@ jobs:
           grep -E "error:|BUILD (SUCCEEDED|FAILED)|\*\* " out/build-full.log | sort -u | head -80 > out/errors.txt || true
           tail -30 out/build-full.log > out/tail.txt
           rm out/build-full.log
-          echo "${{ github.sha }} ${{ job.status }} build=${{ github.run_number }}" > out/status.txt
+          echo "${{ github.sha }} ${{ job.status }} build=$(cat build_number.txt 2>/dev/null || echo ${{ github.run_number }})" > out/status.txt
           cd out
           git init -q -b build-out
           git config user.name "lecture-text"

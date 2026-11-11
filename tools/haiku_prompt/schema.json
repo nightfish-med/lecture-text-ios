@@ -1,0 +1,10 @@
+{"type":"object","additionalProperties":false,
+ "required":["edits","questions","slide_page","page_evidence","chatter"],
+ "properties":{
+  "edits":{"type":"array","items":{"type":"object","additionalProperties":false,
+    "required":["s","wrong","right","type","evidence"],
+    "properties":{"s":{"type":"integer"},"wrong":{"type":"string"},"right":{"type":"string"},
+      "type":{"type":"string","enum":["同音","術語","英文","數字","其他"]},"evidence":{"type":"string"}}}},
+  "questions":{"type":"array","items":{"type":"object","additionalProperties":false,
+    "required":["s","about","text"],"properties":{"s":{"type":"integer"},"about":{"type":"string"},"text":{"type":"string"}}}},
+  "slide_page":{"type":"integer"},"page_evidence":{"type":"string"},"chatter":{"type":"boolean"}}}

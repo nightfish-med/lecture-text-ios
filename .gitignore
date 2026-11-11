@@ -1,0 +1,30 @@
+build/
+simbuild/
+out/
+*.xcodeproj/
+Payload/
+*.ipa
+Sources/Info.plist
+.DS_Store
+# 倉庫只放 App 程式；聲音、逐字稿、聲紋一律不進來
+*.caf
+*.m4a
+*.mp3
+*.wav
+*.aac
+*.flac
+*.ogg
+*.opus
+*.mp4
+*.mov
+*.txt
+# 例外：Haiku 提示詞正本（不是稿；shape_check 要讀它和 Swift 常數比對）
+!tools/haiku_prompt/system.txt
+錄音/
+逐字稿/
+聲紋/
+# 版本快照只留本機
+版本/
+# 個人設定檔（課表、課程對照表）只放裝置和本機，不進倉庫
+設定/
+轉文字設定.json

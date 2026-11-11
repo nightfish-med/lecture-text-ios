@@ -1,0 +1,132 @@
+name: 編譯
+
+# 結果（狀態、錯誤訊息、安裝檔；commit 訊息含 [sim] 時多截圖）推到 build-out 分支，
+# 筆電用一般 git fetch 就拿得到，不用開 Actions 頁下載。
+# 固定 macos-26，不跟著 macos-latest 跳版本。
+# 注意：公開倉庫的 build-out 分支（含安裝檔）誰都看得到；所以個人課表等設定一律放在裝置上的設定檔，不進程式。
+on:
+  push:
+    branches-ignore: [build-out]
+    paths-ignore: ['**.md']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: 檢查修字和斷句（不用手機；v0.21 起編譯錯誤也寫進 shape_check.log）
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          swiftc Sources/TextShaping.swift Sources/Schedule.swift Sources/LinkProtocol.swift Sources/RecordWatch.swift Sources/ClassRecord.swift Sources/LiveFix.swift Sources/SlidePages.swift Sources/HaikuPromptText.swift Sources/HaikuFix.swift Sources/ReviewPlan.swift Sources/DrivePlan.swift Sources/LabPlan.swift Sources/WhisperPlan.swift tools/shape_check/haiku_tests.swift tools/shape_check/review_tests.swift tools/shape_check/drive_tests.swift tools/shape_check/whisper_tests.swift tools/shape_check/main.swift -o shape_check 2>&1 | tee out/shape_check.log
+          ./shape_check | tee -a out/shape_check.log
+      - name: 擋「同一句又讀又寫同一個屬性」（v0.14.16 定稿閃退就是 run?.x = f(run?.x)，編譯器抓不到，執行時直接閃退）
+        shell: bash
+        run: |
+          mkdir -p out
+          perl -ne 'print "$ARGV:$.: $_" if /^\s*(?:self\?\.)?(\w+)\?\.[\w.]+\s*(?:=|\+=|-=)\s*.*\b\1\?/; close ARGV if eof' Sources/*.swift | tee out/overlap.txt
+          if [ -s out/overlap.txt ]; then echo "有同時讀寫的寫法：先用 let 算好再寫回"; exit 1; fi
+          echo "沒有同時讀寫的寫法"
+      - name: 連電腦不能關掉整體安全檢查（v0.15：自簽憑證只靠 QR 碼指紋釘選）
+        shell: bash
+        run: |
+          if grep -rn "NSAllowsArbitraryLoads" project.yml Sources; then echo "不准關掉 ATS"; exit 1; fi
+          grep -q "accepts(fingerprint:" Sources/PhoneLink.swift || { echo "找不到憑證指紋比對"; exit 1; }
+          echo "只放行區域網路，憑證有釘選"
+      - name: 真的查一次維基百科（只送公開名詞）
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          mkdir -p out
+          swiftc Sources/TextShaping.swift Sources/Wiki.swift tools/wiki_check/main.swift -o wiki_check
+          ./wiki_check 2>&1 | tee out/wiki_check.log
+      - name: 產生專案檔
+        run: |
+          mkdir -p out
+          xcodebuild -version > out/xcode.txt
+          xcodebuild -showsdks | grep -i iphoneos >> out/xcode.txt
+          brew install xcodegen
+          sed -i '' 's/CFBundleVersion: .*/CFBundleVersion: "${{ github.run_number }}"/' project.yml
+          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.23.5"/' project.yml
+          xcodegen generate
+      - name: 先抓套件（GitHub 下載偶爾回 504，失敗等 30 秒重試）
+        shell: bash
+        run: |
+          for i in 1 2 3 4; do
+            if xcodebuild -resolvePackageDependencies -project LectureText.xcodeproj -scheme LectureText -derivedDataPath build > out/resolve.log 2>&1; then
+              echo "套件第 $i 次抓好"; exit 0
+            fi
+            tail -5 out/resolve.log
+            sleep 30
+          done
+          exit 1
+      - name: 編譯（不簽名，安裝時由 Sideloadly 簽）
+        run: |
+          xcodebuild \
+            -project LectureText.xcodeproj \
+            -scheme LectureText \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build > out/build-full.log 2>&1
+      - name: 打包 IPA
+        run: |
+          mkdir Payload
+          cp -R build/Build/Products/Release-iphoneos/LectureText.app Payload/
+          zip -qr out/LectureText.ipa Payload
+      - name: 分人走得通嗎（commit 訊息含 [diarize] 才跑；全是合成語音）
+        if: contains(github.event.head_commit.message, '[diarize]')
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cd tools/diarize_check
+          cp ../../Sources/Speakers.swift ../../Sources/TextShaping.swift Sources/
+          mkdir -p clips
+          say -v '?' | head -40 > ../../out/voices.txt || true
+          A="Samantha"; B="Daniel"
+          n=0
+          for line in \
+            "A|Good morning everyone, today we are going to talk about how a library sorts its books and why that matters." \
+            "B|Thanks for having me. I have a question about the shelves, because I never really understood how they are numbered." \
+            "A|Sure, each shelf gets a number from the subject first, and then a second number from the name of the author." \
+            "B|That makes sense now. So the label on the spine is really just those two numbers together, is that the right idea?" \
+            "A|Yes, exactly right. The first part tells you the room, and the second part tells you where it sits on the shelf." \
+            "B|Great, I will write that down and try to explain it back to you at the start of our next meeting."; do
+            who="${line%%|*}"; text="${line#*|}"; n=$((n+1))
+            voice="$A"; [ "$who" = "B" ] && voice="$B"
+            say -v "$voice" -o "clips/$n.aiff" "$text"
+            afconvert -f WAVE -d LEI16@16000 -c 1 "clips/$n.aiff" "clips/$n.wav"
+            args="$args $who:clips/$n.wav"
+          done
+          swift build -c release 2>&1 | tail -5
+          .build/release/diarize_check clips/all.wav $args 2>&1 | grep -v "^\[" | tail -40 | tee ../../out/diarize_check.log
+      - name: 模擬器截圖（只看畫面，模擬器不能驗轉文字）
+        if: contains(github.event.head_commit.message, '[sim]')
+        continue-on-error: true
+        run: bash tools/sim.sh
+      - name: 把結果推到 build-out
+        if: always()
+        run: |
+          mkdir -p out
+          touch out/build-full.log
+          grep -E "error:|BUILD (SUCCEEDED|FAILED)|\*\* " out/build-full.log | sort -u | head -80 > out/errors.txt || true
+          tail -30 out/build-full.log > out/tail.txt
+          rm out/build-full.log
+          echo "${{ github.sha }} ${{ job.status }} build=${{ github.run_number }}" > out/status.txt
+          cd out
+          git init -q -b build-out
+          git config user.name "lecture-text"
+          git config user.email "lecture-text@users.noreply.github.com"
+          git add -A
+          git commit -qm "build ${{ github.sha }}"
+          git push -f "https://x-access-token:${{ github.token }}@github.com/${{ github.repository }}.git" build-out

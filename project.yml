@@ -1,0 +1,73 @@
+name: LectureText
+options:
+  bundleIdPrefix: com.lecturetext
+  deploymentTarget:
+    iOS: "26.0"
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    SWIFT_STRICT_CONCURRENCY: minimal
+    TARGETED_DEVICE_FAMILY: "1,2"
+    ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+packages:
+  FluidAudio:
+    url: https://github.com/FluidInference/FluidAudio
+    exactVersion: 0.18.2
+  # v0.23.4 實驗模式：Whisper（裝置上跑，模型從 Hugging Face 下載）
+  ArgmaxOSS:
+    url: https://github.com/argmaxinc/argmax-oss-swift
+    exactVersion: 1.1.1
+targets:
+  LectureText:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+    dependencies:
+      - package: FluidAudio
+      - package: ArgmaxOSS
+        product: WhisperKit
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: 轉文字
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        NSMicrophoneUsageDescription: 錄上課的聲音，存在這支手機。只有你按「連電腦」時，才經同一個 Wi-Fi 傳到你自己的電腦。
+        NSCameraUsageDescription: 掃你電腦畫面上「連手機」的 QR 碼，連上你自己的電腦。畫面不存、不上傳。
+        NSLocalNetworkUsageDescription: 連上同一個 Wi-Fi 裡你自己的電腦，把手機收到的聲音傳過去轉文字。
+        # v0.15：只放行區域網路（連電腦用）；沒有關掉整體 ATS，自簽憑證靠 QR 碼裡的指紋釘選
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        NSSpeechRecognitionUsageDescription: 在這支手機上把聲音轉成文字，不會上傳。
+        UIBackgroundModes:
+          - audio
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        CFBundleDocumentTypes:
+          - CFBundleTypeName: 音訊或影片
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.audio
+              - public.movie
+          # v0.23.1：投影片 PDF 從「檔案」用分享／打開方式丟進來，只抽字當這門課的投影片（不轉文字）
+          - CFBundleTypeName: 投影片 PDF
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - com.adobe.pdf
+          # 設定檔（轉文字設定.json：課表、課程對照表）從「檔案」用分享／打開方式丟進來，檢查過才套用
+          - CFBundleTypeName: 設定檔 JSON
+            CFBundleTypeRole: Viewer
+            LSHandlerRank: Alternate
+            LSItemContentTypes:
+              - public.json
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UISupportedInterfaceOrientations~ipad:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationPortraitUpsideDown
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight

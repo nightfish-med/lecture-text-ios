@@ -36,9 +36,11 @@ final class LiveReviewer {
     private let glossary: [LiveFixRule]
     /// v0.24 即時模式：true＝60 秒一批（模式 2、3）
     @ObservationIgnored private(set) var bigBatch = false
-    /// v0.24 即時模式 2：錄音中的 Whisper（nil＝沒跑）
-    @ObservationIgnored private(set) var whisper: LiveWhisper?
-    @ObservationIgnored private var whisperWait: [Int: Date] = [:]
+    /// v0.25 即時模式 1：另一個辨識器同一段的字（時間含續錄位移）；nil＝不附
+    @ObservationIgnored private var reference: ((Double, Double) -> String)?
+    @ObservationIgnored private var referenceName = ""
+    /// Haiku 最近一次判出的投影片頁碼
+    private(set) var lastPage: Int?
     private let file: URL
     private let clock: @MainActor () -> Double
     private let onEvent: @MainActor (String) -> Void
@@ -97,9 +99,10 @@ final class LiveReviewer {
     }
 
     /// v0.24：即時模式（start 前叫）
-    func configure(bigBatch: Bool, whisper: LiveWhisper?) {
+    func configure(bigBatch: Bool, referenceName: String = "", reference: ((Double, Double) -> String)? = nil) {
         self.bigBatch = bigBatch
-        self.whisper = whisper
+        self.referenceName = referenceName
+        self.reference = reference
     }
 
     // MARK: 開始、關掉
@@ -244,23 +247,17 @@ final class LiveReviewer {
             log.batches[index] = batch
             return
         }
-        // v0.24 模式 2：等 Whisper 轉到這批的結尾（最多 40 秒），再把同一段的 Whisper 稿附上
+        // v0.25 模式 1：主稿是 Whisper，附同一段 Apple 的字當證據（Apple 比 Whisper 快，不用等）
         var reference = ""
-        if let whisper {
-            if whisper.covered < batch.audioEnd - 0.5, !whisper.finished {
-                let since = whisperWait[batch.id] ?? Date()
-                whisperWait[batch.id] = since
-                if Date().timeIntervalSince(since) < LiveWhisper.waitSeconds { return }
-            }
-            whisperWait[batch.id] = nil
-            reference = whisper.text(from: batch.audioStart, to: batch.audioEnd)
+        if let source = self.reference {
+            reference = String(source(batch.audioStart, batch.audioEnd).prefix(1500))
             batch.whisperChars = reference.count
         }
         batch.attempts += 1
         batch.state = .sending
         log.batches[index] = batch
         inFlight = true
-        let message = HaikuPrompt.userMessage(context: batch.context, units: units) + LiveWhisper.referenceBlock(reference)
+        let message = HaikuPrompt.userMessage(context: batch.context, units: units) + LiveWhisper.referenceBlock(reference, name: referenceName)
         let block = courseBlock
         let apiKey = key
         let id = batch.id
@@ -329,6 +326,7 @@ final class LiveReviewer {
                 batch.usage = usage
                 batch.chatter = reply.chatter
                 batch.slidePage = reply.slide_page > 0 ? reply.slide_page : nil
+                if let page = batch.slidePage { lastPage = page }
                 batch.pageEvidence = reply.page_evidence.isEmpty ? nil : reply.page_evidence
                 batch.error = nil
                 state = parsed.state

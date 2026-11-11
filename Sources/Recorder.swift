@@ -143,7 +143,44 @@ final class AudioPump: @unchecked Sendable {
     /// 把麥克風接回來，回傳一句結果（寫進紀錄）。v0.20：以前 try? 吞掉，接不回來也不知道。
     /// 被打斷、看門狗發現停了、回到前景都會叫。
     @discardableResult
+    /// v0.25 模擬上課：拿錄好的檔當麥克風，照 speed 倍速餵（存檔、Apple、Whisper 走同一條路，所以錄音秒數、Haiku 批次都照真的算）。
+    /// 讀完或按停止後叫 onEnd（主執行緒）。
+    func startFile(_ src: URL, speed: Double, onEnd: @escaping () -> Void) throws {
+        let reader = try AVAudioFile(forReading: src)
+        let format = reader.processingFormat
+        guard let fileConverter = AVAudioConverter(from: format, to: fileFormat),
+              let analyzerConverter = AVAudioConverter(from: format, to: analyzerFormat) else {
+            throw RecorderError.couldNotStart
+        }
+        lock.lock()
+        toFile = fileConverter
+        toAnalyzer = analyzerConverter
+        simulating = true
+        lock.unlock()
+        let chunk = AVAudioFrameCount(max(1, format.sampleRate / 2))
+        Thread.detachNewThread { [weak self] in
+            while true {
+                guard let self, self.feeding, let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: chunk) else { break }
+                do { try reader.read(into: buffer, frameCount: chunk) } catch { break }
+                if buffer.frameLength == 0 { break }
+                self.handle(buffer)
+                Thread.sleep(forTimeInterval: 0.5 / speed)
+            }
+            DispatchQueue.main.async { onEnd() }
+        }
+    }
+
+    private var simulating = false
+    private var feeding: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return toFile != nil
+    }
+
     func recover() -> String {
+        if simulating {
+            return "模擬上課中，不用接麥克風"
+        }
         if engine.isRunning {
             return "麥克風還在收"
         }
@@ -371,7 +408,10 @@ final class LiveSession {
         onVolatile: @escaping @MainActor (String) -> Void,
         onError: @escaping @MainActor (String) -> Void,
         onEvent: @escaping @MainActor (String) -> Void,
-        tap: SampleTap? = nil
+        tap: SampleTap? = nil,
+        simulate: URL? = nil,
+        speed: Double = 4,
+        onSimEnd: (@MainActor () -> Void)? = nil
     ) async throws -> LiveSession {
         guard await AVAudioApplication.requestRecordPermission() else {
             throw RecorderError.microphoneDenied
@@ -415,7 +455,13 @@ final class LiveSession {
         }
         do {
             pump.tap = tap
-            try pump.start()        // 先收音，引擎晚一點開始也不會掉字
+            if let simulate {
+                try pump.startFile(simulate, speed: speed) {
+                    MainActor.assumeIsolated { onSimEnd?() }
+                }
+            } else {
+                try pump.start()        // 先收音，引擎晚一點開始也不會掉字
+            }
             try await analyzer.start(inputSequence: stream)
         } catch {
             pump.stop()

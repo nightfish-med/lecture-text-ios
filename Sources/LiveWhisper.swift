@@ -44,11 +44,14 @@ final class SampleTap: @unchecked Sendable {
 @MainActor
 @Observable
 final class LiveWhisper {
-    static let window = 25.0, search = 5.0
+    /// v0.25：主稿用 Whisper，段縮短到 15 秒（多看 3 秒找最安靜處切），字約晚 15–20 秒出來
+    static let window = 15.0, search = 3.0
     /// Haiku 那批的 Whisper 還沒轉到時最多等幾秒（牆上時間）
     static let waitSeconds = 40.0
 
     let tap = SampleTap()
+    /// v0.25：每轉完一段就把這段的字交出去（時間＝這段錄音的秒數，不含續錄位移）
+    @ObservationIgnored var onPieces: (([TimedPiece]) -> Void)?
     /// 續錄位移（秒）：時間和 Apple 那邊一樣加上去
     private let offset: Double
     private let saveTo: URL?
@@ -87,6 +90,15 @@ final class LiveWhisper {
     /// 錄音停了：剩下的聲音轉完就結束
     func end() { ending = true }
 
+    /// 等剩下的轉完，最多 seconds 秒；逾時就收掉
+    func waitDone(_ seconds: Double) async {
+        let deadline = Date().addingTimeInterval(seconds)
+        while !finished, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(250))
+        }
+        if !finished { cancel() }
+    }
+
     func cancel() {
         task?.cancel()
         task = nil
@@ -120,6 +132,7 @@ final class LiveWhisper {
                 compute += Date().timeIntervalSince(clock)
                 let kept = WhisperClean.clean(raw).pieces
                 pieces += kept
+                onPieces?(kept)
                 pending.removeFirst(cut)
                 pendingStart += cut
                 covered = at + Double(cut) / rate
@@ -151,9 +164,10 @@ final class LiveWhisper {
     }
 
     /// 附在 Haiku 新稿後面的一段（系統提示詞不動，快取照舊）
-    static func referenceBlock(_ text: String) -> String {
+    /// v0.25：name＝另一個辨識器的名字（主稿是 Whisper 時附 Apple）
+    static func referenceBlock(_ text: String, name: String) -> String {
         guard !text.isEmpty else { return "" }
-        return "\n\nWhisper 同一段（另一個辨識器，只當證據，不准改這段、不准問這段）：\n\(text)\n"
-            + "新稿和 Whisper 寫得不一樣、而 Whisper 的寫法明顯比較合理（術語、英文、同音字）時可以改新稿，evidence 寫「Whisper」。Whisper 也會重複、漏字、亂寫，兩邊都不合理就不要改。"
+        return "\n\n\(name) 同一段（另一個辨識器，只當證據，不准改這段、不准問這段）：\n\(text)\n"
+            + "新稿和 \(name) 寫得不一樣、而 \(name) 的寫法明顯比較合理（術語、英文、同音字）時可以改新稿，evidence 寫「\(name)」。兩個辨識器都會聽錯，兩邊都不合理就不要改。"
     }
 }

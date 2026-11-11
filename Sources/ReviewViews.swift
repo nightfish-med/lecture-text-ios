@@ -75,6 +75,13 @@ struct HaikuMenu: View {
                 } label: {
                     Label("即時模式：\(AppModel.liveModeNames[min(max(model.liveMode, 0), 2)])", systemImage: "dial.medium")
                 }
+                // v0.25：不用錄音也能完整測一次（選錄好的檔，4 倍速；先在上面指定課名 Haiku 才會送）
+                Button {
+                    model.simulateNext = true
+                    model.showImporter = true
+                } label: {
+                    Label("用錄好的檔模擬上課（4 倍速，Whisper、Haiku 都跑）", systemImage: "play.square.stack")
+                }
             }
             // v0.23.4：實驗模式（Apple 現用／Apple 聽寫＋關鍵字／Whisper 同一個錄音檔各轉一次）
             Section {

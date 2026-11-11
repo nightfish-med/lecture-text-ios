@@ -114,12 +114,21 @@ final class AppModel {
     var fixMode: Int = UserDefaults.standard.integer(forKey: "fixMode") {
         didSet { UserDefaults.standard.set(fixMode, forKey: "fixMode") }
     }
-    /// v0.24 即時模式（下一次錄音生效）。0＝Apple＋Haiku 15 秒一批（原本）；1＝Apple＋Whisper 同時跑，Haiku 60 秒一批看兩份；
-    /// 2＝Apple＋Haiku 60 秒一批（不跑 Whisper，對照用）。畫面都只顯示 Apple＋Haiku 綠字。
+    /// v0.24 即時模式（下一次錄音生效）。0＝Apple＋Haiku 15 秒一批（原本）；
+    /// 1（v0.25）＝主稿用錄音中的 Whisper（約晚 15–20 秒），Whisper 還沒轉到的那一小段先用 Apple 灰字；Haiku 60 秒一批改 Whisper 稿、附 Apple 當證據；
+    /// 2＝Apple＋Haiku 60 秒一批（不跑 Whisper，對照用）。
     var liveMode: Int = UserDefaults.standard.integer(forKey: "liveMode") {
         didSet { UserDefaults.standard.set(liveMode, forKey: "liveMode") }
     }
-    static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Apple＋Whisper＋Haiku（60 秒一批，看兩份）", "Apple＋Haiku（60 秒一批，對照用）"]
+    static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Whisper 主稿＋Apple 灰字＋Haiku（60 秒一批）", "Apple＋Haiku（60 秒一批，對照用）"]
+    /// v0.25 模擬上課：下一個選來的檔當作錄音跑（4 倍速，Whisper、Haiku 都跑）
+    var simulateNext = false
+    @ObservationIgnored private var simSource: URL?
+    /// v0.25 模式 1：這場主稿是 Whisper（停止後不跑 Apple 定稿）
+    @ObservationIgnored private var whisperMain = false
+    /// v0.25 模式 1：Apple 的字（這段錄音的秒數），灰字和 Haiku 證據用
+    @ObservationIgnored private var applePieces: [TimedPiece] = []
+    @ObservationIgnored private var appleVolatile = ""
     /// v0.24：這場錄音中的 Whisper（模式 1 才有）
     private(set) var liveWhisper: LiveWhisper?
     var speakerModeLabel: String {
@@ -346,6 +355,37 @@ final class AppModel {
         }
     }
 
+    /// v0.25 模擬上課：選來的檔當作錄音，4 倍速跑完整流程（Apple、Whisper、Haiku、匯出都和真的錄音一樣）。
+    /// 課名照「下一場是哪門課」；沒指定 Haiku 會說沒有課名（可以錄音中再指定）。
+    func simulate(_ url: URL) {
+        guard !isBusy else { return }
+        phase = .copying
+        Task {
+            do {
+                let copy = try await Task.detached { try Store.copyToTemporary(url) }.value
+                phase = .idle
+                continuing = nil
+                liveFixOff = []
+                reviewBase = nil
+                pendingCourse = chosenCourse.map(CourseSchedule.shortName)
+                chosenCourse = nil
+                simSource = copy
+                startRecording(to: nil)
+            } catch {
+                log("模擬上課：選檔複製失敗（.\(url.pathExtension)）：\(error.localizedDescription)", toRun: false)
+                phase = .failed(error.localizedDescription)
+            }
+        }
+    }
+
+    /// v0.25 模式 1：灰字＝Whisper 還沒轉到的 Apple 字（最多 200 字）
+    private func refreshGray() {
+        let covered = liveWhisper?.covered ?? 0
+        applePieces.removeAll { $0.end < covered - 120 }
+        let tail = applePieces.filter { $0.end > covered }.map(\.text).joined() + appleVolatile
+        volatileText = TextCleanup.fix(String(tail.suffix(200)))
+    }
+
     /// 結果畫面的麥克風：接著這一場往下錄。新的一段另存錄音檔，字接在原稿後面。
     func continueRecording() {
         // v0.16：電腦傳來的稿沒有手機的錄音（聲音在電腦），不能接著錄
@@ -410,11 +450,24 @@ final class AppModel {
                 // v0.24 即時模式 1：錄音中同時跑 Whisper（存檔那份聲音抄一份給它）
                 liveWhisper?.cancel()
                 liveWhisper = nil
+                whisperMain = false
+                applePieces = []
+                appleVolatile = ""
                 if liveMode == 1, let current = run {
                     let path = Store.reviewFile(of: current).path.replacingOccurrences(of: " 改字.json", with: " Whisper即時.txt")
-                    let lw = LiveWhisper(offset: continuing?.offset ?? 0, saveTo: URL(fileURLWithPath: path))
+                    let lw = LiveWhisper(offset: 0, saveTo: URL(fileURLWithPath: path))
+                    lw.onPieces = { [weak self] new in
+                        self?.appendLive(new)
+                        self?.refreshGray()
+                    }
                     lw.start()
                     liveWhisper = lw
+                    whisperMain = true
+                }
+                let sim = simSource
+                simSource = nil
+                if let sim {
+                    log("模擬上課：用選來的檔（.\(sim.pathExtension)）4 倍速當作錄音，Apple、Whisper、Haiku 照真的跑")
                 }
                 log("即時模式：\(Self.liveModeNames[min(max(liveMode, 0), 2)])")
                 // v0.23.2：條件都符合（金鑰、課名、這門課開著、不是私人課程）才建審稿器；否則和 v0.22 一樣
@@ -428,13 +481,26 @@ final class AppModel {
                         self?.phase = .downloading(fraction)
                     },
                     onFinal: { [weak self] new in
-                        self?.noteFirstWord()
-                        self?.volatileText = ""
-                        self?.appendLive(new)
+                        guard let self else { return }
+                        self.noteFirstWord()
+                        if self.whisperMain {
+                            self.applePieces += new
+                            self.appleVolatile = ""
+                            self.refreshGray()
+                            return
+                        }
+                        self.volatileText = ""
+                        self.appendLive(new)
                     },
                     onVolatile: { [weak self] text in
-                        self?.noteFirstWord()
-                        self?.volatileText = TextCleanup.fix(text)
+                        guard let self else { return }
+                        self.noteFirstWord()
+                        if self.whisperMain {
+                            self.appleVolatile = text
+                            self.refreshGray()
+                            return
+                        }
+                        self.volatileText = TextCleanup.fix(text)
                     },
                     onError: { [weak self] message in
                         self?.liveError = message
@@ -443,7 +509,13 @@ final class AppModel {
                     onEvent: { [weak self] line in
                         self?.log(line)
                     },
-                    tap: liveWhisper?.tap
+                    tap: liveWhisper?.tap,
+                    simulate: sim,
+                    onSimEnd: { [weak self] in
+                        guard let self, self.phase == .recording else { return }
+                        self.log("模擬上課：檔案放完，自動停止")
+                        self.stopRecording()
+                    }
                 )
                 phase = .recording
                 startWatch()
@@ -484,14 +556,11 @@ final class AppModel {
         stopWatch()
         job = Task {
             let seconds = await session.finish()
-            // v0.24：Whisper 把剩下的聲音轉完（Haiku 最後幾批會等它，最多 40 秒）；90 秒後一定收掉，免得和下課 Whisper 同時佔記憶體
+            // v0.25：Whisper 把剩下的聲音轉完（最多 60 秒）再收尾，主稿才完整；之後收掉，免得和下課 Whisper 同時佔記憶體
             if let lw = liveWhisper {
                 lw.end()
-                Task { @MainActor [weak self] in
-                    try? await Task.sleep(for: .seconds(90))
-                    lw.cancel()
-                    if let self, self.liveWhisper === lw { self.log(lw.note) }
-                }
+                await lw.waitDone(60)
+                log(lw.note)
             }
             // v0.23.2：停止餵字 → 還沒送的批補送，和整段重轉同時開始；包在背景時間裡最多等 60 秒（規格 A④）
             let review = reviewer
@@ -528,7 +597,11 @@ final class AppModel {
                 saveLiveDraft(draft)
             }
             finalDone = false
-            if let url = liveURL {
+            if whisperMain {
+                // v0.25 模式 1：主稿就是錄音中的 Whisper，不用 Apple 定稿換掉
+                log("即時模式 1：主稿用錄音中的 Whisper，不跑 Apple 定稿")
+                phase = .idle
+            } else if let url = liveURL {
                 await transcribe(audioURL: url, sourceName: url.lastPathComponent, draft: draft)
             } else {
                 phase = .idle
@@ -755,6 +828,11 @@ final class AppModel {
         // 設定檔（課表、課程對照表）：檢查過才存進 Documents/設定/ 並套用；別的 .json 不收
         if url.pathExtension.lowercased() == "json" {
             importSettings(url)
+            return
+        }
+        if simulateNext {
+            simulateNext = false
+            simulate(url)
             return
         }
         guard !isBusy else { return }
@@ -1415,7 +1493,16 @@ final class AppModel {
             clock: { [weak self] in self?.recordingSeconds ?? 0 },
             onEvent: { [weak self] line in self?.log(line) }
         )
-        review.configure(bigBatch: liveMode != 0, whisper: liveMode == 1 ? liveWhisper : nil)
+        if whisperMain {
+            // 主稿是 Whisper：附同一段 Apple 的字（Haiku 的時間含續錄位移，Apple 的不含）
+            let shift = continuing?.offset ?? 0
+            review.configure(bigBatch: true, referenceName: "Apple") { [weak self] start, end in
+                guard let self else { return "" }
+                return self.applePieces.filter { $0.end > start - shift - 1 && $0.start < end - shift + 1 }.map(\.text).joined()
+            }
+        } else {
+            review.configure(bigBatch: liveMode != 0)
+        }
         review.start()
         reviewer = review
         // 投影片檔名可能有人名，紀錄只寫頁數
@@ -1454,6 +1541,7 @@ final class AppModel {
     /// 錄音畫面標題下那一行
     var reviewStatusLine: String {
         ReviewText.slides(reviewer?.deckName ?? sessionSlides) + "　" + (reviewer?.statusLine ?? ReviewText.closed(reviewOffReason))
+            + (reviewer?.lastPage.map { "　投影片 p.\($0)" } ?? "")
             + (liveWhisper.map { "　" + $0.note } ?? "")
     }
 

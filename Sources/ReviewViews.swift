@@ -67,7 +67,7 @@ struct HaikuMenu: View {
                 }
             }
             // v0.24：即時模式（下一次錄音生效）
-            Section("即時模式（下一次錄音生效；畫面都只顯示 Apple＋綠字；Whisper 要先下載過模型）") {
+            Section("即時模式（下一次錄音生效；Whisper 要先下載過模型）") {
                 Picker(selection: Binding(get: { model.liveMode }, set: { model.liveMode = $0 })) {
                     ForEach(0..<AppModel.liveModeNames.count, id: \.self) { i in
                         Text(AppModel.liveModeNames[i]).tag(i)

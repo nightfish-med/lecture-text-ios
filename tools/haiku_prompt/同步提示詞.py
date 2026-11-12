@@ -1,4 +1,4 @@
-"""從 tools/haiku_prompt/system.txt、schema.json 產生 Sources/HaikuPromptText.swift（v0.23.2）。
+"""從 tools/haiku_prompt/system.txt、schema.json（v0.26.0 起加 card.txt、card_schema.json）產生 Sources/HaikuPromptText.swift（v0.23.2）。
 
 提示詞和 schema 的唯一正本是這個資料夾的兩個檔；Swift 常數不要手抄，每次 commit 前跑一次：
     python tools/haiku_prompt/同步提示詞.py          產生（有變才寫檔）
@@ -13,7 +13,9 @@ import sys
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parent.parent
 OUT = REPO / 'Sources' / 'HaikuPromptText.swift'
-SOURCES = [('system', HERE / 'system.txt'), ('schema', HERE / 'schema.json')]
+# v0.26.0：card、cardSchema＝即時模式 1 每批一張卡（擴寫式校正＋整理版＋頁碼）
+SOURCES = [('system', HERE / 'system.txt'), ('schema', HERE / 'schema.json'),
+           ('card', HERE / 'card.txt'), ('cardSchema', HERE / 'card_schema.json')]
 
 
 def read(path):

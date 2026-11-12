@@ -1,7 +1,7 @@
 import Foundation
 
 // 雲端編譯前先跑：修字和斷句。不用模擬器、不用手機。
-// swiftc Sources/TextShaping.swift Sources/Schedule.swift Sources/LinkProtocol.swift Sources/RecordWatch.swift Sources/ClassRecord.swift Sources/LiveFix.swift Sources/SlidePages.swift Sources/HaikuPromptText.swift Sources/HaikuFix.swift Sources/ReviewPlan.swift Sources/DrivePlan.swift Sources/LabPlan.swift Sources/WhisperPlan.swift Sources/LiveCutPlan.swift tools/shape_check/haiku_tests.swift tools/shape_check/review_tests.swift tools/shape_check/drive_tests.swift tools/shape_check/whisper_tests.swift tools/shape_check/livecut_tests.swift tools/shape_check/main.swift -o shape_check && ./shape_check
+// swiftc Sources/TextShaping.swift Sources/Schedule.swift Sources/LinkProtocol.swift Sources/RecordWatch.swift Sources/ClassRecord.swift Sources/LiveFix.swift Sources/SlidePages.swift Sources/HaikuPromptText.swift Sources/HaikuFix.swift Sources/ReviewPlan.swift Sources/DrivePlan.swift Sources/LabPlan.swift Sources/WhisperPlan.swift Sources/LiveCutPlan.swift Sources/LiveCards.swift tools/shape_check/haiku_tests.swift tools/shape_check/review_tests.swift tools/shape_check/drive_tests.swift tools/shape_check/whisper_tests.swift tools/shape_check/livecut_tests.swift tools/shape_check/cards_tests.swift tools/shape_check/main.swift -o shape_check && ./shape_check
 var failed = 0
 func check(_ got: String, _ want: String, _ name: String) {
     if got == want {
@@ -1029,6 +1029,8 @@ driveTests(check)
 whisperTests(check)
 // v0.23.5 實驗模式「Whisper 切句（照電腦版，模擬邊錄邊轉）」：切句、落後模擬、報告那一節：tools/shape_check/livecut_tests.swift
 liveCutTests(check)
+// v0.26.0 即時模式 1 每批一張卡（逐字比對、一句一行、回覆解析、把關、整理版）：tools/shape_check/cards_tests.swift
+cardsTests(check)
 
 print(failed == 0 ? "全部通過" : "失敗 \(failed) 項")
 exit(failed == 0 ? 0 : 1)

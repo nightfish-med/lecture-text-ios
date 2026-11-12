@@ -39,8 +39,17 @@ final class LiveReviewer {
     /// v0.25 即時模式 1：另一個辨識器同一段的字（時間含續錄位移）；nil＝不附
     @ObservationIgnored private var reference: ((Double, Double) -> String)?
     @ObservationIgnored private var referenceName = ""
-    /// Haiku 最近一次判出的投影片頁碼
+    /// Haiku 最近一次判出的投影片頁碼（v0.26.0 模式 1：時間最晚、有頁碼的那張卡）
     private(set) var lastPage: Int?
+    /// v0.26.0 即時模式 1：每批一張卡（擴寫式校正＋重點＋整理版＋頁碼），不跑挑字改字和 FixValidator
+    @ObservationIgnored private(set) var cardMode = false
+    /// 卡片（依開始時間）；續錄時前幾段的卡也在
+    private(set) var cards: [LiveCard] = []
+    /// 每張卡的原稿 vs 擴寫比對（回覆回來時在背景算好，畫面不重算）
+    private(set) var diffs: [Int: [CardDiff.Piece]] = [:]
+    @ObservationIgnored private var cardsFile: URL?
+    /// 這一段（續錄的新段）第一個批次編號：停止後的逐字稿只換這段
+    @ObservationIgnored private var firstBatchID = 0
     private let file: URL
     private let clock: @MainActor () -> Double
     private let onEvent: @MainActor (String) -> Void
@@ -96,13 +105,28 @@ final class LiveReviewer {
         self.nextBatchID = (start.batches.map(\.id).max() ?? 0) + 1
         self.lastPlanned = now
         self.lastAudio = now
+        self.firstBatchID = self.nextBatchID
     }
 
-    /// v0.24：即時模式（start 前叫）
-    func configure(bigBatch: Bool, referenceName: String = "", reference: ((Double, Double) -> String)? = nil) {
+    /// v0.24：即時模式（start 前叫）。v0.26.0：cards＝模式 1 每批一張卡；cardsFile＝「… 卡片.json」；savedCards＝續錄前的卡
+    func configure(bigBatch: Bool, referenceName: String = "", cards: Bool = false, cardsFile: URL? = nil,
+                   savedCards: [LiveCard] = [], reference: ((Double, Double) -> String)? = nil) {
         self.bigBatch = bigBatch
         self.referenceName = referenceName
         self.reference = reference
+        self.cardMode = cards
+        self.cardsFile = cards ? cardsFile : nil
+        if cards {
+            // 上一段沒整理完的卡：單位已經不在記憶體，送不了
+            self.cards = savedCards.map { card -> LiveCard in
+                guard card.state == .waiting else { return card }
+                var out = card
+                out.state = .failed
+                out.note = "上一段停止時沒整理完"
+                return out
+            }
+            self.lastPage = CardText.latestPage(self.cards)
+        }
     }
 
     // MARK: 開始、關掉
@@ -157,7 +181,17 @@ final class LiveReviewer {
     var pendingCount: Int { ReviewQueue.pendingCount(log.batches) }
 
     var statusLine: String {
-        ReviewText.status(done: doneCount, passed: passedCount, blocked: blockedCount, lastLatency: lastLatency, stop: stop)
+        if cardMode {
+            let mine = cards.filter { $0.id >= firstBatchID }
+            return ReviewText.cardStatus(done: mine.filter { $0.state == .done }.count, failed: mine.filter { $0.state == .failed }.count,
+                                         lastLatency: lastLatency, stop: stop)
+        }
+        return ReviewText.status(done: doneCount, passed: passedCount, blocked: blockedCount, lastLatency: lastLatency, stop: stop)
+    }
+
+    /// v0.26.0 模式 1：還沒排進批次的字從 run.text 的第幾個字開始（卡片下面的即時字用）；nil＝都排進去了
+    var unsentOffset: Int? {
+        splitter.unsent.first?.offsetStart
     }
 
     /// 橫幅（不擋操作）：停用 > 沒網路 > Anthropic 忙
@@ -225,6 +259,9 @@ final class LiveReviewer {
         log.batches.append(batch)
         log.maxUnitID = max(log.maxUnitID, splitter.nextID - 1)
         lastPlanned = now
+        if cardMode {
+            upsertWaiting(batch)
+        }
     }
 
     private func sendNext() {
@@ -235,6 +272,9 @@ final class LiveReviewer {
             log.batches = merged
             for batch in merged where batch.state == .pending {
                 splitter.markSent(batch.unitIDs, batch: batch.id)
+            }
+            if cardMode {
+                syncWaitingCards()
             }
         }
         guard let index = log.batches.firstIndex(where: { $0.state == .pending }) else { return }
@@ -257,10 +297,25 @@ final class LiveReviewer {
         batch.state = .sending
         log.batches[index] = batch
         inFlight = true
-        let message = HaikuPrompt.userMessage(context: batch.context, units: units) + LiveWhisper.referenceBlock(reference, name: referenceName)
         let block = courseBlock
         let apiKey = key
         let id = batch.id
+        if cardMode {
+            // v0.26.0 模式 1：一批一張卡。原稿不帶 [s編號]；回覆比較長，用比較長的逾時
+            let raw = units.map(\.text).joined()
+            let message = CardPrompt.userMessage(context: batch.context, raw: raw, reference: reference, referenceName: referenceName)
+            Task {
+                let outcome = await Task.detached { () -> HaikuOutcome in
+                    guard let body = try? CardPrompt.requestBody(courseBlock: block, userMessage: message) else {
+                        return .failure(message: "請求內容編不出來", offline: false)
+                    }
+                    return await HaikuClient.send(body: body, key: apiKey, session: HaikuClient.cardSession, timeout: HaikuClient.cardTimeout)
+                }.value
+                await self.handleCard(outcome, batchID: id, raw: raw)
+            }
+            return
+        }
+        let message = HaikuPrompt.userMessage(context: batch.context, units: units) + LiveWhisper.referenceBlock(reference, name: referenceName)
         Task {
             let outcome = await Task.detached { () -> HaikuOutcome in
                 guard let body = try? HaikuPrompt.requestBody(courseBlock: block, userMessage: message) else {
@@ -326,7 +381,11 @@ final class LiveReviewer {
                 batch.usage = usage
                 batch.chatter = reply.chatter
                 batch.slidePage = reply.slide_page > 0 ? reply.slide_page : nil
-                if let page = batch.slidePage { lastPage = page }
+                if let page = batch.slidePage {
+                    lastPage = page
+                    // v0.26.0：fixes.json 的 pages 以前一直是空的，每批判出的頁碼記進去
+                    log.pages.append(PageMark(at: batch.audioStart, page: page, source: "haiku", unitID: batch.unitIDs.first ?? 0))
+                }
                 batch.pageEvidence = reply.page_evidence.isEmpty ? nil : reply.page_evidence
                 batch.error = nil
                 state = parsed.state
@@ -363,6 +422,181 @@ final class LiveReviewer {
             log.batches[now] = batch
             log.maxUnitID = max(log.maxUnitID, splitter.nextID - 1)
         }
+    }
+
+    // MARK: v0.26.0 模式 1：卡片
+
+    /// 卡片回來：解析、程式把關（頁碼範圍、擴寫太短不採用）、比對都在背景；失敗照現有重試規則，放棄的卡只放原稿
+    private func handleCard(_ outcome: HaikuOutcome, batchID: Int, raw: String) async {
+        defer {
+            inFlight = false
+            syncWaitingCards()
+            save()
+            if !closed { tick() }
+        }
+        guard let index = log.batches.firstIndex(where: { $0.id == batchID }) else { return }
+        var batch = log.batches[index]
+        switch outcome {
+        case .failure(let message, let offline):
+            batch.error = message
+            if offline { batch.attempts -= 1 }
+            apply(ReviewRetry.afterNetworkError(offline: offline, attempts: batch.attempts), to: &batch, status: nil)
+            log.batches[index] = batch
+        case .response(let data, let status, let latency, let retryAfter):
+            batch.http = status
+            batch.latency = latency
+            let step = ReviewRetry.after(status: status, attempts: batch.attempts, retryAfter: retryAfter)
+            guard step == .parse else {
+                batch.error = HaikuClient.errorText(data, status: status)
+                apply(step, to: &batch, status: status)
+                log.batches[index] = batch
+                return
+            }
+            let pageCount = pages.count
+            let parsed = await Task.detached { () -> CardParsed in
+                let result = CardPrompt.parseResponse(data)
+                guard case .reply(let reply, _) = result else { return CardParsed(result: result, reply: nil, note: nil, diff: []) }
+                let accepted = CardPrompt.accept(reply, raw: raw, pageCount: pageCount)
+                return CardParsed(result: result, reply: accepted.reply, note: accepted.note,
+                                  diff: CardDiff.pieces(raw: raw, expanded: accepted.reply.expanded))
+            }.value
+            guard let now = log.batches.firstIndex(where: { $0.id == batchID }) else { return }
+            batch = log.batches[now]
+            addCost(parsed.result.usage)
+            addCardCost(batchID, usage: parsed.result.usage)
+            switch parsed.result {
+            case .reply(_, let usage):
+                batch.state = .done
+                batch.usage = usage
+                batch.error = nil
+                if let reply = parsed.reply {
+                    batch.slidePage = reply.page
+                    if let page = reply.page {
+                        log.pages.append(PageMark(at: batch.audioStart, page: page, source: "haiku", unitID: batch.unitIDs.first ?? 0))
+                    }
+                    finishCard(batchID, batch: batch, raw: raw, reply: reply, note: parsed.note, diff: parsed.diff)
+                }
+                consecutive400 = 0
+                lastLatency = latency
+                waitNote = nil
+            case .refusal(let usage):
+                batch.state = .done
+                batch.stopReason = "refusal"
+                batch.usage = usage
+                batch.error = "Haiku 拒絕這批，只放原稿"
+                failCard(batchID, note: "Haiku 拒絕這批")
+                consecutive400 = 0
+            case .truncated(let usage):
+                batch.state = .done
+                batch.stopReason = "max_tokens"
+                batch.usage = usage
+                batch.error = "回覆超過長度上限，只放原稿"
+                failCard(batchID, note: "回覆超過長度上限")
+                consecutive400 = 0
+            case .unreadable(let reason, let usage):
+                batch.usage = usage
+                batch.error = "回覆解析失敗：\(reason)"
+                apply(ReviewRetry.afterUnreadable(attempts: batch.attempts), to: &batch, status: nil)
+            }
+            log.batches[now] = batch
+        }
+    }
+
+    private func finishCard(_ id: Int, batch: ReviewBatch, raw: String, reply: CardReply, note: String?, diff: [CardDiff.Piece]) {
+        var card = cards.first(where: { $0.id == id }) ?? LiveCard(id: id, start: batch.audioStart, end: batch.audioEnd, raw: raw)
+        card.start = batch.audioStart
+        card.end = batch.audioEnd
+        card.raw = raw
+        card.state = .done
+        card.page = reply.page
+        card.key = reply.key
+        card.tidy = reply.tidy
+        card.unsure = reply.unsure
+        card.expanded = reply.expanded
+        card.note = note
+        put(card)
+        diffs[id] = diff
+        lastPage = CardText.latestPage(cards)
+    }
+
+    private func failCard(_ id: Int, note: String) {
+        guard var card = cards.first(where: { $0.id == id }) else { return }
+        card.state = .failed
+        card.note = note
+        put(card)
+    }
+
+    private func addCardCost(_ id: Int, usage: Usage?) {
+        guard let usage, let i = cards.firstIndex(where: { $0.id == id }) else { return }
+        let cost = Cost.usd(usage)
+        cards[i].costUSD += cost
+    }
+
+    /// 有就換、沒有就加，依開始時間排
+    private func put(_ card: LiveCard) {
+        if let i = cards.firstIndex(where: { $0.id == card.id }) {
+            cards[i] = card
+        } else {
+            cards.append(card)
+            cards.sort { $0.start < $1.start }
+        }
+    }
+
+    /// 批次排出去時先放一張「整理中」的卡（原稿先看得到）
+    private func upsertWaiting(_ batch: ReviewBatch) {
+        let ids = Set(batch.unitIDs)
+        let raw = splitter.units.filter { ids.contains($0.id) }.map(\.text).joined()
+        if let existing = cards.first(where: { $0.id == batch.id }) {
+            guard existing.state == .waiting else { return }
+            var card = existing
+            card.raw = raw
+            card.start = batch.audioStart
+            card.end = batch.audioEnd
+            if card != existing { put(card) }
+        } else {
+            put(LiveCard(id: batch.id, start: batch.audioStart, end: batch.audioEnd, raw: raw))
+        }
+    }
+
+    /// 合併、放棄之後對齊卡片：被併掉的批的卡拿掉、併成的批補卡；放棄、失敗的批的卡改成「沒整理到」
+    private func syncWaitingCards() {
+        guard cardMode else { return }
+        let byID = Dictionary(log.batches.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
+        let first = firstBatchID
+        cards.removeAll { $0.state == .waiting && $0.id >= first && byID[$0.id] == nil }
+        let waiting = cards.filter { $0.state == .waiting }.map(\.id)
+        for id in waiting {
+            guard let batch = byID[id] else { continue }
+            switch batch.state {
+            case .failed, .abandoned, .done:
+                // 放棄、400、停用；或回來了卻沒有卡的內容：只放原稿
+                failCard(id, note: "沒整理到")
+            case .pending, .sending:
+                break
+            }
+        }
+        for batch in log.batches where batch.id >= first && (batch.state == .pending || batch.state == .sending) {
+            upsertWaiting(batch)
+        }
+    }
+
+    /// 停止後還沒整理到的卡改成「沒整理到」（逐字稿用原稿）
+    private func finalizeCards() {
+        guard cardMode else { return }
+        let waiting = cards.filter { $0.state == .waiting }.map(\.id)
+        for id in waiting {
+            failCard(id, note: "停止時還沒整理到")
+        }
+        if !waiting.isEmpty { save() }
+    }
+
+    /// 停止後的逐字稿（只有這一段）：各卡的擴寫依時間接起來，沒整理到的用原稿，沒進卡的原稿接在最後
+    func cardTranscript() -> String {
+        let mine = cards.filter { $0.id >= firstBatchID }
+        let ids = Set(mine.map(\.id))
+        let covered = Set(log.batches.filter { ids.contains($0.id) }.flatMap(\.unitIDs))
+        let tail = splitter.units.filter { !covered.contains($0.id) }.map(\.text).joined()
+        return CardText.transcript(mine, tail: tail)
     }
 
     private func apply(_ step: ReviewRetry.Step, to batch: inout ReviewBatch, status: Int?) {
@@ -435,6 +669,7 @@ final class LiveReviewer {
             if !inFlight, stop != nil || (pendingCount == 0 && splitter.unsent.isEmpty) { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
+        finalizeCards()
         countPromoted()
         await saving?.value
         return pendingCount
@@ -468,16 +703,30 @@ final class LiveReviewer {
     private func save() {
         guard let data = Store.encodeReview(log) else { return }
         let url = file
+        // v0.26.0 模式 1：卡片另存「… 卡片.json」（稿的字只在這個檔和 fixes.json）
+        let cardData = cardsFile == nil ? nil : Store.encodeCards(cards)
+        let cardURL = cardsFile
         let previous = saving
         saving = Task.detached {
             await previous?.value
             try? data.write(to: url, options: .atomic)
+            if let cardData, let cardURL {
+                try? cardData.write(to: cardURL, options: .atomic)
+            }
         }
     }
 
     func waitForSaves() async {
         await saving?.value
     }
+}
+
+/// v0.26.0 卡片背景解析的結果（放在類別外面：不跟著 MainActor）
+private struct CardParsed {
+    let result: CardResult
+    let reply: CardReply?
+    let note: String?
+    let diff: [CardDiff.Piece]
 }
 
 /// 背景解析＋驗證的結果（放在類別外面：不跟著 MainActor）

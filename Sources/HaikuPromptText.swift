@@ -4,6 +4,8 @@ import Foundation
 // 只用 Foundation，shape_check 也編；shape_check 會讀正本逐字比對。
 // system.txt SHA-256（去 BOM、換行統一成 \n 之後）前 12 碼：735719e0563c
 // schema.json SHA-256（去 BOM、換行統一成 \n 之後）前 12 碼：3bfc21ea362c
+// card.txt SHA-256（去 BOM、換行統一成 \n 之後）前 12 碼：29f44a88d888
+// card_schema.json SHA-256（去 BOM、換行統一成 \n 之後）前 12 碼：78cca4cd7fbb
 
 enum HaikuPromptText {
     static let system = [
@@ -46,6 +48,36 @@ enum HaikuPromptText {
         "  \"questions\":{\"type\":\"array\",\"items\":{\"type\":\"object\",\"additionalProperties\":false,",
         "    \"required\":[\"s\",\"about\",\"text\"],\"properties\":{\"s\":{\"type\":\"integer\"},\"about\":{\"type\":\"string\"},\"text\":{\"type\":\"string\"}}}},",
         "  \"slide_page\":{\"type\":\"integer\"},\"page_evidence\":{\"type\":\"string\"},\"chatter\":{\"type\":\"boolean\"}}}",
+        "",
+    ].joined(separator: "\n")
+
+    static let card = [
+        "你在幫一位學生即時整理上課的語音辨識稿。他邊聽課邊看你的整理抄筆記。每次給你大約一分鐘的稿，你回一個 JSON。",
+        "",
+        "稿的格式：",
+        "- 「前文」：上一段的稿，只給你看上下文。不要整理、不要寫進 expanded。",
+        "- 「這段原稿」：語音辨識（Whisper）的這一段，要整理的就是這段。",
+        "- 「Apple 同一段」：另一個辨識器聽同一段的字，只當證據：兩邊寫得不一樣時，用比較合理的那個（術語、英文、同音字）。兩個辨識器都會聽錯。",
+        "",
+        "一、expanded：做擴寫式校正。從頭到尾保留每一句話、老師的口氣、語助詞、閒聊、學生插話，不摘要、不刪句、不補老師沒講的內容。把聽錯的字改成老師最可能講的字（中文術語、英文術語、數字、算式都要改），可以對照投影片和詞表。句子不通的地方可以補必要的連接字並加標點。真的猜不出來的字原樣保留。只寫「這段原稿」的內容。",
+        "",
+        "二、tidy：2–4 句通順中文，只寫老師真的講到的；聽不出來寫（這段聽不清）。",
+        "",
+        "三、key：一句重點，15 字內。",
+        "",
+        "四、unsure：不確定的詞最多 2 個，格式「原字→猜測」；沒有就給空陣列。",
+        "",
+        "五、page：這段對應的投影片頁碼（投影片全文裡的 [p.N]）；看不出來、或這堂沒有投影片，填 0。",
+        "",
+    ].joined(separator: "\n")
+
+    static let cardSchema = [
+        "{\"type\":\"object\",\"additionalProperties\":false,",
+        " \"required\":[\"page\",\"key\",\"tidy\",\"unsure\",\"expanded\"],",
+        " \"properties\":{",
+        "  \"page\":{\"type\":\"integer\"},\"key\":{\"type\":\"string\"},\"tidy\":{\"type\":\"string\"},",
+        "  \"unsure\":{\"type\":\"array\",\"items\":{\"type\":\"string\"}},",
+        "  \"expanded\":{\"type\":\"string\"}}}",
         "",
     ].joined(separator: "\n")
 }

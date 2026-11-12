@@ -20,6 +20,7 @@ Sources/Info.plist
 *.txt
 # 例外：Haiku 提示詞正本（不是稿；shape_check 要讀它和 Swift 常數比對）
 !tools/haiku_prompt/system.txt
+!tools/haiku_prompt/card.txt
 錄音/
 逐字稿/
 聲紋/

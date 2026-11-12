@@ -161,10 +161,16 @@ private struct RecordingView: View {
         .padding(.top, 8)
         // v0.23.2：投影片＋Haiku 狀態一行、橫幅（沒網路、金鑰無效、花費上限、Haiku 暫停；不擋操作）
         ReviewStatusBar(model: model)
-        // v0.22：錄音中的字照課程對照表改（只改畫面），改過的字綠底，點了看原字
-        LiveText(final: model.recordingTail, volatile: model.volatileText,
-                 rules: model.liveFixRules, turnOff: { model.turnOffLiveFix($0) })
-            .padding(.top, 4)
+        if let review = model.reviewer, review.cardMode {
+            // v0.26.0 即時模式 1：每 60 秒一張卡（重點、整理版、擴寫原稿），下面接還沒進卡的字（LiveCardViews.swift）
+            LiveCardsView(model: model, review: review)
+                .padding(.top, 4)
+        } else {
+            // v0.22：錄音中的字照課程對照表改（只改畫面），改過的字綠底，點了看原字
+            LiveText(final: model.recordingTail, volatile: model.volatileText,
+                     rules: model.liveFixRules, turnOff: { model.turnOffLiveFix($0) })
+                .padding(.top, 4)
+        }
         if let part = model.continuing?.part {
             Text("續錄第 \(part) 段，接在原稿後面；時間從整場開頭算")
                 .font(.caption)
@@ -228,7 +234,8 @@ struct LiveText: View {
     /// v0.23.2 效能：黑字和規則沒變就不重算（灰字每變一次 body 都會重跑；以前每次整份 × 全部規則重算）
     @State private var cache = LiveStyleCache()
 
-    fileprivate static let fixGreen = Color(red: 0.06, green: 0.46, blue: 0.43)
+    /// v0.26.0 起卡片的改字也用這個綠（LiveCardViews.swift）
+    static let fixGreen = Color(red: 0.06, green: 0.46, blue: 0.43)
     fileprivate static let fixBack = Color(red: 0.90, green: 0.96, blue: 0.95)
 
     private var styled: AttributedString {

@@ -208,9 +208,20 @@ extension HaikuClient {
         return URLSession(configuration: config)
     }()
 
+    /// v0.26.0 即時模式 1 的卡片：回覆是一整段擴寫全文（不串流，整份回來才算完），請求逾時 60 秒、整體 90 秒
+    static let cardTimeout = 60.0
+    static let cardSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.timeoutIntervalForRequest = cardTimeout
+        config.timeoutIntervalForResource = 90
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config)
+    }()
+
     /// POST /v1/messages。body 由 HaikuPrompt.requestBody 產生（Codable＋sortedKeys，快取靠這個）。回傳資料、HTTP 狀態、延遲秒數。
-    static func send(body: Data, key: String) async -> HaikuOutcome {
-        var request = URLRequest(url: endpoint, timeoutInterval: 30)
+    /// v0.26.0：session、timeout 可換（卡片用 cardSession）；預設和以前一樣。
+    static func send(body: Data, key: String, session: URLSession = HaikuClient.reviewSession, timeout: Double = 30) async -> HaikuOutcome {
+        var request = URLRequest(url: endpoint, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue(key, forHTTPHeaderField: "x-api-key")
         request.setValue(apiVersion, forHTTPHeaderField: "anthropic-version")
@@ -218,7 +229,7 @@ extension HaikuClient {
         request.httpBody = body
         let started = Date()
         do {
-            let (data, response) = try await reviewSession.data(for: request)
+            let (data, response) = try await session.data(for: request)
             let http = response as? HTTPURLResponse
             return .response(
                 data: data,
@@ -231,7 +242,7 @@ extension HaikuClient {
                                                  .internationalRoamingOff, .callIsActive]
             let message: String
             switch error.code {
-            case .timedOut: message = "逾時：30 秒沒回應"
+            case .timedOut: message = "逾時：\(Int(timeout)) 秒沒回應"
             case .notConnectedToInternet, .dataNotAllowed: message = "沒有網路"
             case .networkConnectionLost: message = "連線中斷（-1005）"
             case .cannotFindHost, .cannotConnectToHost, .dnsLookupFailed: message = "連不上 Anthropic（\(error.code.rawValue)）"

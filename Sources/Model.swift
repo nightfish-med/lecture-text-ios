@@ -99,6 +99,12 @@ final class AppModel {
     /// 辨識中只顯示最後一小段；全文等結束才放進畫面（幾小時的課字很多）。
     var liveTail: String { String((run?.text ?? "").suffix(300)) }
     var recordingTail: String { String((run?.text ?? "").suffix(3000)) }
+    /// v0.26.0 模式 1：還沒排進批次（還沒有卡）的 Whisper 字，卡片下面顯示；Apple 灰字另外接在後面（volatileText）
+    var cardTail: String {
+        guard let text = run?.text, let start = reviewer?.unsentOffset else { return "" }
+        let body = String(text.dropFirst(min(max(start, 0), text.count)))
+        return String(body.trimmingCharacters(in: .whitespacesAndNewlines).suffix(800))
+    }
 
     var showImporter = false
     /// v0.15：開「連電腦」畫面（手機當電腦的麥克風）。
@@ -120,7 +126,7 @@ final class AppModel {
     var liveMode: Int = UserDefaults.standard.integer(forKey: "liveMode") {
         didSet { UserDefaults.standard.set(liveMode, forKey: "liveMode") }
     }
-    static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Whisper 主稿＋Apple 灰字＋Haiku（60 秒一批）", "Apple＋Haiku（60 秒一批，對照用）"]
+    static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Whisper 主稿＋Haiku 每 60 秒一張卡（重點、整理版、擴寫）", "Apple＋Haiku（60 秒一批，對照用）"]
     /// v0.25 模擬上課：下一個選來的檔當作錄音跑（4 倍速，Whisper、Haiku 都跑）
     var simulateNext = false
     @ObservationIgnored private var simSource: URL?
@@ -568,7 +574,9 @@ final class AppModel {
             if let review {
                 beginReviewBackground()
                 review.stopFeeding()
-                flush = Task { await review.flush(seconds: 60) }
+                // v0.26.0 模式 1：一張卡的回覆比較長、模擬上課 4 倍速會積幾批，最多等 180 秒
+                let wait = review.cardMode ? 180.0 : 60.0
+                flush = Task { await review.flush(seconds: wait) }
             }
             let ended = Store.timestamp()
             stopStamp = ended
@@ -622,10 +630,12 @@ final class AppModel {
                 let finalRun = run
                 let finalPieces = finalDone ? pieces : []
                 let done = finalDone
+                // v0.26.0 模式 1：續錄時原稿＋分隔行留著，只換這段（continuing 下面就清掉，先拿）
+                let head = continuing?.head ?? ""
                 Task {
                     let unsent = await flush.value
-                    await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done)
-                    autoUpload(uploadRun, fallbackReport: uploadReport)
+                    let swapped = await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done, head: head)
+                    autoUpload(swapped ?? uploadRun, fallbackReport: uploadReport)
                     // v0.23.5：定稿、Haiku 補送都結束才開始下課 Whisper
                     stopFlowActive = false
                     whisper.kick("停止後")
@@ -1495,8 +1505,10 @@ final class AppModel {
         )
         if whisperMain {
             // 主稿是 Whisper：附同一段 Apple 的字（Haiku 的時間含續錄位移，Apple 的不含）
+            // v0.26.0：每批一張卡（擴寫式校正＋重點＋整理版＋頁碼），不跑挑字改字；卡片另存「… 卡片.json」，續錄讀回前幾段的卡
             let shift = continuing?.offset ?? 0
-            review.configure(bigBatch: true, referenceName: "Apple") { [weak self] start, end in
+            review.configure(bigBatch: true, referenceName: "Apple", cards: true, cardsFile: Store.cardsFile(of: current),
+                             savedCards: Store.loadCards(of: current)) { [weak self] start, end in
                 guard let self else { return "" }
                 return self.applePieces.filter { $0.end > start - shift - 1 && $0.start < end - shift + 1 }.map(\.text).joined()
             }
@@ -1562,7 +1574,10 @@ final class AppModel {
 
     /// 補送結束後：定稿完整就補定稿命中（規格 A③），改字紀錄寫到最後那場（即時那場錄音中已經每批寫過）。
     /// 定稿沒跑完退回即時稿時，最後那場就是即時那場，紀錄照樣留著。
-    private func finishReview(_ review: LiveReviewer, unsent: Int, finalRun: SavedRun?, finalPieces: [TimedPiece], finalDone: Bool) async {
+    /// v0.26.0 模式 1：逐字稿換成各卡的擴寫接起來（原字照舊在「… 原文.txt」＝raw.txt），回傳換過的那場（自動上傳用）。
+    @discardableResult
+    private func finishReview(_ review: LiveReviewer, unsent: Int, finalRun: SavedRun?, finalPieces: [TimedPiece], finalDone: Bool,
+                              head: String = "") async -> SavedRun? {
         if finalDone, !finalPieces.isEmpty {
             await review.annotateFinal(text: TextCleanup.fix(finalPieces.map(\.text).joined()), pieces: finalPieces)
         }
@@ -1570,6 +1585,32 @@ final class AppModel {
         let data = review.log
         if let finalRun {
             await Task.detached { Store.saveReview(data, of: finalRun) }.value
+        }
+        var swapped: SavedRun?
+        if review.cardMode, let finalRun {
+            let cards = review.cards
+            let body = review.cardTranscript()
+            let newText = head + body
+            if !body.isEmpty {
+                if run?.startedStamp == finalRun.startedStamp {
+                    run?.text = newText
+                    swapped = run
+                } else {
+                    // 已經開始下一場：只改存檔，不動畫面
+                    var other = finalRun
+                    other.text = newText
+                    swapped = other
+                }
+            }
+            let target = swapped
+            await Task.detached {
+                Store.saveCards(cards, of: finalRun)
+                if let target {
+                    Store.saveTranscript(target, updateLast: false)
+                }
+            }.value
+            let doneCards = cards.filter { $0.state == .done }.count
+            log("即時模式 1：逐字稿換成卡片的擴寫（\(doneCards)／\(cards.count) 張整理到，\(newText.count) 字；原字在原文檔）", toRun: run?.startedStamp == finalRun.startedStamp)
         }
         review.close()
         if reviewer === review {
@@ -1588,10 +1629,12 @@ final class AppModel {
             log(line)
             if let current = run {
                 Store.saveTranscript(current)
+                if swapped != nil { swapped = current }
             }
         } else {
             log(line, toRun: false)
         }
+        return swapped
     }
 
     private func append(_ new: [TimedPiece], reached: Double) {
@@ -1839,6 +1882,19 @@ final class AppModel {
     func copyWhileRecording() {
         guard phase == .recording, let current = run else { return }
         let at = recordingSeconds
+        if let review = reviewer, review.cardMode {
+            let text = CardText.copy(review.cards)
+            guard !text.isEmpty else {
+                flashLiveCopy("還沒有整理好的卡")
+                return
+            }
+            UIPasteboard.general.setItems([[UTType.plainText.identifier: text]], options: [.localOnly: true])
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            // 紀錄只寫張數和字數，不放稿的字
+            log("錄音中複製卡片：到 \(formatStamp(at))，\(review.cards.filter { $0.state == .done }.count) 張，\(text.count) 字")
+            flashLiveCopy("已複製到 \(formatStamp(at))")
+            return
+        }
         let text = LiveCopy.join(final: current.text, volatile: volatileText)
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             flashLiveCopy("還沒有字可以複製")

@@ -1059,9 +1059,11 @@ enum HaikuPrompt {
         return "前文（只參考，不准改）：\n\(ctx)\n\n新稿：\n" + units.map { "[s\($0.id)] \($0.text)" }.joined(separator: "\n")
     }
 
+    /// v0.26.0：system、schemaText 可換（即時模式 1 的卡片用 CardPrompt）；預設和以前一樣，送出的位元組不變。
     static func request(courseBlock: String, userMessage: String, effort: String = HaikuPrompt.effort,
-                        maxTokens: Int = HaikuPrompt.maxTokens) throws -> HaikuRequest {
-        let format = try schema()
+                        maxTokens: Int = HaikuPrompt.maxTokens, system: String = HaikuPrompt.system,
+                        schemaText: String = HaikuPrompt.schemaText) throws -> HaikuRequest {
+        let format = try JSONDecoder().decode(JSONValue.self, from: Data(schemaText.utf8))
         return HaikuRequest(
             model: model,
             max_tokens: maxTokens,
@@ -1076,10 +1078,12 @@ enum HaikuPrompt {
 
     /// 請求內容（不送 thinking、temperature，也不預填回覆）。標頭在 HaikuClient：x-api-key、anthropic-version 2026-10-21、content-type。
     static func requestBody(courseBlock: String, userMessage: String, effort: String = HaikuPrompt.effort,
-                            maxTokens: Int = HaikuPrompt.maxTokens) throws -> Data {
+                            maxTokens: Int = HaikuPrompt.maxTokens, system: String = HaikuPrompt.system,
+                            schemaText: String = HaikuPrompt.schemaText) throws -> Data {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
-        return try encoder.encode(request(courseBlock: courseBlock, userMessage: userMessage, effort: effort, maxTokens: maxTokens))
+        return try encoder.encode(request(courseBlock: courseBlock, userMessage: userMessage, effort: effort, maxTokens: maxTokens,
+                                          system: system, schemaText: schemaText))
     }
 
     /// 先看 stop_reason（refusal、max_tokens 不套），再從 content 找第一個 type=="text" 的區塊解成 HaikuReply。

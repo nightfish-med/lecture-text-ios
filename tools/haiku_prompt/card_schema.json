@@ -1,0 +1,6 @@
+{"type":"object","additionalProperties":false,
+ "required":["page","key","tidy","unsure","expanded"],
+ "properties":{
+  "page":{"type":"integer"},"key":{"type":"string"},"tidy":{"type":"string"},
+  "unsure":{"type":"array","items":{"type":"string"}},
+  "expanded":{"type":"string"}}}

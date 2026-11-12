@@ -208,6 +208,20 @@ enum ReviewText {
         return line
     }
 
+    /// v0.26.0 即時模式 1（每批一張卡）的狀態列：整理了幾張、沒整理到幾張
+    static func cardStatus(done: Int, failed: Int, lastLatency: Double?, stop: ReviewStop?) -> String {
+        let counts = "整理 \(done) 張" + (failed > 0 ? "・沒整理到 \(failed) 張" : "")
+        if let stop {
+            return "Haiku：已停（\(stop.short)）・" + counts
+        }
+        guard done + failed > 0 else { return "Haiku：等待第一張卡" }
+        var line = "Haiku：" + counts
+        if let lastLatency {
+            line += String(format: "・上一批 %.1f 秒", lastLatency)
+        }
+        return line
+    }
+
     static func closed(_ reason: String) -> String {
         "Haiku：已關閉（\(reason)）"
     }

@@ -139,6 +139,28 @@ enum Store {
         return try? JSONDecoder().decode(ReviewLog.self, from: data)
     }
 
+    /// v0.26.0 即時模式 1：每批一張卡（「… 卡片.json」；raw、expanded 是稿的字，只存在這個檔）
+    static func cardsFile(of run: SavedRun) -> URL {
+        file(of: run, " 卡片.json")
+    }
+
+    static func encodeCards(_ cards: [LiveCard]) -> Data? {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        return try? encoder.encode(cards)
+    }
+
+    static func saveCards(_ cards: [LiveCard], of run: SavedRun) {
+        if let data = encodeCards(cards) {
+            try? data.write(to: cardsFile(of: run), options: .atomic)
+        }
+    }
+
+    static func loadCards(of run: SavedRun) -> [LiveCard] {
+        guard let data = try? Data(contentsOf: cardsFile(of: run)) else { return [] }
+        return (try? JSONDecoder().decode([LiveCard].self, from: data)) ?? []
+    }
+
     /// 分人的原始結果另存，之後校準或改人用。
     static func saveTurns(_ run: SavedRun, turns: [SpeakerTurn]) {
         if let data = try? JSONEncoder().encode(turns) {
@@ -269,7 +291,7 @@ enum Store {
         try manager.createDirectory(at: folder, withIntermediateDirectories: true)
         var listing = [
             "轉文字 匯出 \(stamp)",
-            "transcript.txt  逐字稿（含稿頭，和複製全文一樣）",
+            "transcript.txt  逐字稿（含稿頭，和複製全文一樣；即時模式 1 是各卡的擴寫式校正接起來，原字在 raw.txt）",
         ]
         try run.document.write(to: folder.appendingPathComponent("transcript.txt"), atomically: true, encoding: .utf8)
         let copies = [
@@ -281,7 +303,9 @@ enum Store {
             (" 即時稿.txt", "live.txt", "錄音當下的即時稿（按停止時存的，定稿前的字；續錄的每段用「——第N段即時稿——」分開）"),
             (" 即時時間.json", "live_times.json", "即時稿每一小段字的開始、結束秒數（續錄從第一段開頭算）"),
             // v0.23.2：錄音中 Haiku 改字紀錄
-            (" 改字.json", "fixes.json", "錄音中 Haiku 改字紀錄：每批送了哪些單位、花多少、每條改字的判定與定稿命中（unitText、context、finalWindow 是稿的字）"),
+            (" 改字.json", "fixes.json", "錄音中 Haiku 紀錄：每批送了哪些單位、花多少、每條改字的判定與定稿命中、每批判出的投影片頁碼 pages（unitText、context、finalWindow 是稿的字）"),
+            // v0.26.0：即時模式 1 每批一張卡
+            (" 卡片.json", "cards.json", "即時模式 1 每批一張卡：start、end（錄音秒數）、page（投影片頁碼）、key（一句重點）、tidy（整理版）、unsure（不確定的詞）、raw（送出的 Whisper 原稿）、expanded（Haiku 擴寫式校正的全文，逐字稿就是這些接起來）、costUSD（這張卡花的美元）、state（done／failed＝沒整理到）"),
             // v0.23.5：下課後用 Whisper 在裝置上再轉的一份（開關在星星選單，預設關；轉完才有）
             (WhisperFiles.text, "whisper.txt", "下課後在這台裝置上用 Whisper 再轉的一份（稿頭寫模型、轉多久、濾掉幾處鬼打牆；續錄的每段用分隔行分開）"),
             (WhisperFiles.times, "whisper_times.json", "Whisper 稿每一小段字的開始、結束秒數（格式同 times.json，續錄從第一段開頭算）"),
@@ -291,6 +315,12 @@ enum Store {
             guard manager.fileExists(atPath: source.path) else { continue }
             try manager.copyItem(at: source, to: folder.appendingPathComponent(name))
             listing.append("\(name)  \(meaning)")
+        }
+        // v0.26.0：即時模式 1 的整理版（每張卡的時間、頁碼、重點、整理版、不確定的詞）
+        let cards = loadCards(of: run)
+        if !cards.isEmpty {
+            try CardText.tidyFile(cards).write(to: folder.appendingPathComponent("tidy.txt"), atomically: true, encoding: .utf8)
+            listing.append("tidy.txt  整理版：每張卡（約 60 秒）的時間、投影片頁碼、一句重點、整理版、不確定的詞；沒整理到的卡寫「（沒整理到）」")
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]

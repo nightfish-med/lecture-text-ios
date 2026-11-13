@@ -22,7 +22,15 @@ struct LiveCardsView: View {
     var body: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                // v0.26.3 修「閃」：LazyVStack 在內容一直變高、又捲到底時會先用估的高度，畫面整片空白一下再出現（11/13 真機 1:14 空白、1:19 有字）。
+                // 一堂課最多約 100 張卡，用一般 VStack 全部排好，高度不再用估的。
+                VStack(alignment: .leading, spacing: 12) {
+                    if review.cards.isEmpty, model.cardTail.isEmpty, model.volatileText.isEmpty {
+                        // v0.26.3：第一句出來前（Whisper 要先聽一段）畫面不是空的，免得以為壞掉
+                        Text(CardText.listening)
+                            .font(.callout)
+                            .foregroundStyle(.tertiary)
+                    }
                     ForEach(review.cards) { card in
                         LiveCardView(card: card, diff: review.diffs[card.id],
                                      slides: SlideRef(course: review.course, source: review.log.slides))
@@ -53,8 +61,8 @@ struct LiveCardsView: View {
             .onScrollGeometryChange(for: Spot.self) { geo in
                 Spot(offset: geo.contentOffset.y, visible: geo.containerSize.height, content: geo.contentSize.height)
             } action: { old, new in
-                // 內容變長（新卡、新字）：原本在底部才跟著捲
-                if new.content != old.content, atBottom {
+                // 內容變長（新卡、新字）：原本在底部才跟著捲；內容比畫面短時不捲（捲了反而整片空白）
+                if new.content != old.content, atBottom, new.content > new.visible {
                     Task { @MainActor in
                         proxy.scrollTo(Self.bottomID, anchor: .bottom)
                     }
@@ -77,8 +85,9 @@ private struct LiveCardsTail: View {
         let whisper = model.cardTail
         let apple = model.volatileText
         if !whisper.isEmpty || !apple.isEmpty {
+            // v0.26.3：和卡片裡的完整文字同一個大小，字進卡片時不會突然變小
             Text(Self.styled(whisper: whisper, apple: apple))
-                .font(.title3)
+                .font(.callout)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -226,7 +235,7 @@ struct LiveCardView: View {
             case .done:
                 if !card.key.isEmpty {
                     Text(card.key)
-                        .font(.headline)
+                        .font(.title3.weight(.semibold))  // v0.26.3 字分大小：重點最大
                 }
                 if !card.tidy.isEmpty {
                     Text(card.tidy)
@@ -242,7 +251,7 @@ struct LiveCardView: View {
             // 整理到＝改好的全文（改過的字綠色，點了看原字）；還在整理、沒整理到＝Whisper 原字
             if !card.transcriptText.isEmpty {
                 Text(styled)
-                    .font(.body)
+                    .font(.callout)  // v0.26.3：完整文字比整理版小一號
                     .tint(LiveText.fixGreen)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .environment(\.openURL, OpenURLAction { url in

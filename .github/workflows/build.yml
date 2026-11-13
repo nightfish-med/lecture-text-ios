@@ -57,7 +57,7 @@ jobs:
           BN=$(( ${{ github.run_number }} + 41 ))
           echo "$BN" > out/build_number.txt
           sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$BN\"/" project.yml
-          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.26.2"/' project.yml
+          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.26.3"/' project.yml
           xcodegen generate
       - name: 先抓套件（GitHub 下載偶爾回 504，失敗等 30 秒重試）
         shell: bash

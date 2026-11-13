@@ -3,7 +3,8 @@ import UIKit
 import UniformTypeIdentifiers
 
 // v0.26.0 即時模式 1 錄音畫面：由上而下一張張卡（每 60 秒一張），下面接還沒進卡的字。
-// 每張卡：頁碼小膠囊＋時間範圍、一句重點、整理版、不確定的詞、「原稿」（預設展開；擴寫後全文一句一行，改過的字綠色，點了才看原字）。
+// 每張卡：時間＋頁碼、一句重點、整理版、不確定的詞、逐字稿（一律顯示，改過的字綠色，點了才看原字）、「原始轉錄」（預設收起來）。
+// v0.26.4：寬＝左逐字稿、右重點卡；窄＝一欄，重點在段落上方。字級 22／15／13／11。
 // 卡片的資料、比對在 LiveCards.swift（純邏輯，shape_check 測）；這個檔只畫。
 
 /// 卡片清單＋下面的即時字。使用者原本在底部才自動捲到底（往上看舊卡時不跳）。
@@ -11,6 +12,8 @@ struct LiveCardsView: View {
     let model: AppModel
     let review: LiveReviewer
     @State private var atBottom = true
+    /// v0.26.4：畫面寬度（≥ 700 點＝左右兩欄）
+    @State private var width: CGFloat = 0
 
     /// 捲動位置（只比這三個數字）
     private struct Spot: Equatable {
@@ -24,24 +27,28 @@ struct LiveCardsView: View {
             ScrollView {
                 // v0.26.3 修「閃」：LazyVStack 在內容一直變高、又捲到底時會先用估的高度，畫面整片空白一下再出現（11/13 真機 1:14 空白、1:19 有字）。
                 // 一堂課最多約 100 張卡，用一般 VStack 全部排好，高度不再用估的。
-                VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 22) {
                     if review.cards.isEmpty, model.cardTail.isEmpty, model.volatileText.isEmpty {
                         // v0.26.3：第一句出來前（Whisper 要先聽一段）畫面不是空的，免得以為壞掉
                         Text(CardText.listening)
-                            .font(.callout)
+                            .font(.system(size: LiveCardView.Size.text))
                             .foregroundStyle(.tertiary)
                     }
                     ForEach(review.cards) { card in
                         LiveCardView(card: card, diff: review.diffs[card.id],
-                                     slides: SlideRef(course: review.course, source: review.log.slides))
+                                     slides: SlideRef(course: review.course, source: review.log.slides),
+                                     wide: LiveCardView.isWide(width))
                     }
+                    // 寬的時候即時字只佔左欄（和逐字稿對齊）
                     LiveCardsTail(model: model, review: review)
+                        .padding(.trailing, LiveCardView.isWide(width) ? 320 : 0)
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomID)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             // v0.26.2：一打開在底部；內容比畫面短時從上面排（不再上面留一大片白）
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.top, for: .alignment)
@@ -85,9 +92,10 @@ private struct LiveCardsTail: View {
         let whisper = model.cardTail
         let apple = model.volatileText
         if !whisper.isEmpty || !apple.isEmpty {
-            // v0.26.3：和卡片裡的完整文字同一個大小，字進卡片時不會突然變小
+            // 和卡片裡的逐字稿同一個大小，字進卡片時不會突然變大變小
             Text(Self.styled(whisper: whisper, apple: apple))
-                .font(.callout)
+                .font(.system(size: LiveCardView.Size.text))
+                .lineSpacing(3)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
@@ -188,113 +196,156 @@ struct LiveCardView: View {
 
     static let unsureOrange = Color(red: 0.78, green: 0.40, blue: 0.0)
 
+    /// v0.26.4：寬（iPad 全螢幕）＝左逐字稿、右重點卡；窄（分割畫面、手機）＝一欄，重點在段落上方
+    var wide = false
+
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                if let page = card.page {
-                    Text("p.\(page)")
-                        .font(.caption.weight(.semibold))
-                        .monospacedDigit()
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(Color(.systemGray5)))
-                }
-                Spacer(minLength: 8)
-                Text(CardText.range(card))
-                    .font(.caption2)
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                // v0.26.1：分享到別的 App（文字＋那一頁投影片的圖）
-                Button {
-                    let target = anchor.view
-                    Task { await CardShare.present(card, slides: slides, anchor: target) }
-                } label: {
-                    Image(systemName: "square.and.arrow.up")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .frame(width: 28, height: 22)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .background(ShareAnchorView(box: anchor))
-                .accessibilityLabel("分享這張卡")
-            }
-            switch card.state {
-            case .waiting:
-                HStack(spacing: 6) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text(card.note ?? "整理中")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
-            case .failed:
-                Text(card.note ?? "沒整理到")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            case .done:
-                if !card.key.isEmpty {
-                    Text(card.key)
-                        .font(.title3.weight(.semibold))  // v0.26.3 字分大小：重點最大
-                }
-                if !card.tidy.isEmpty {
-                    Text(card.tidy)
-                        .font(.body)
-                }
-                if !card.unsure.isEmpty {
-                    Text(card.unsure.joined(separator: "　"))
-                        .font(.caption)
-                        .foregroundStyle(Self.unsureOrange)
-                }
-            }
-            // v0.26.2：完整文字一律顯示，不收合。
-            // 整理到＝改好的全文（改過的字綠色，點了看原字）；還在整理、沒整理到＝Whisper 原字
-            if !card.transcriptText.isEmpty {
-                Text(styled)
-                    .font(.callout)  // v0.26.3：完整文字比整理版小一號
-                    .tint(LiveText.fixGreen)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .environment(\.openURL, OpenURLAction { url in
-                        guard url.scheme == "cardfix", let group = Int(url.lastPathComponent) else { return .systemAction }
-                        if shown.contains(group) {
-                            shown.remove(group)
-                        } else {
-                            shown.insert(group)
-                        }
-                        return .handled
-                    })
-            }
-            // 原稿（Whisper 原字）只在整理到的卡才另外有，預設收起來
-            if card.state == .done, !card.raw.isEmpty, card.raw != card.transcriptText {
-                Button {
-                    rawOpen.toggle()
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: rawOpen ? "chevron.down" : "chevron.right")
-                            .font(.caption2)
-                        Text("原稿")
-                            .font(.caption)
+        Group {
+            if wide {
+                HStack(alignment: .top, spacing: 20) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        header
+                        transcript
                     }
-                    .foregroundStyle(.secondary)
-                    .contentShape(Rectangle())
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    VStack(alignment: .leading, spacing: 6) {
+                        keyBlock
+                    }
+                    .padding(14)
+                    .frame(width: 300, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 12).fill(Color(.systemGray6)))
                 }
-                .buttonStyle(.plain)
-                .accessibilityLabel(rawOpen ? "收合原稿" : "展開原稿")
-                if rawOpen {
-                    Text(CardDiff.lines(card.raw))
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    keyBlock
+                    header
+                    transcript
                 }
             }
         }
-        .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(RoundedRectangle(cornerRadius: 14).fill(Color(.systemGray6)))
         .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 14))
         // v0.26.1：長按拖到旁邊的 App（文字＋圖）
         .onDrag {
             CardShare.provider(card, slides: slides)
+        }
+    }
+
+    /// v0.26.4 字級（他 11/13 定：重點大、逐字稿小）：重點 22 粗 → 整理版 15 → 逐字稿 13 → 時間 11
+    /// 寬度夠放左右兩欄嗎（右欄 300 點＋間距，左欄至少約 380 點）
+    static func isWide(_ width: CGFloat) -> Bool { width >= 700 }
+
+    enum Size {
+        static let key: CGFloat = 22
+        static let tidy: CGFloat = 15
+        static let text: CGFloat = 13
+        static let time: CGFloat = 11
+    }
+
+    /// 時間、頁碼、分享鈕一行
+    private var header: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
+            Text(CardText.range(card))
+                .font(.system(size: Size.time))
+                .monospacedDigit()
+                .foregroundStyle(.tertiary)
+            if let page = card.page {
+                Text("p.\(page)")
+                    .font(.system(size: Size.time, weight: .semibold))
+                    .monospacedDigit()
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 8)
+            // v0.26.1：分享到別的 App（文字＋那一頁投影片的圖）
+            Button {
+                let target = anchor.view
+                Task { await CardShare.present(card, slides: slides, anchor: target) }
+            } label: {
+                Image(systemName: "square.and.arrow.up")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(width: 28, height: 22)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .background(ShareAnchorView(box: anchor))
+            .accessibilityLabel("分享這張卡")
+        }
+    }
+
+    /// 重點、整理版、不確定的詞；還在整理、沒整理到時是一行小字
+    @ViewBuilder
+    private var keyBlock: some View {
+        switch card.state {
+        case .waiting:
+            HStack(spacing: 6) {
+                ProgressView()
+                    .controlSize(.small)
+                Text(card.note ?? "整理中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        case .failed:
+            Text(card.note ?? "沒整理到")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .done:
+            if !card.key.isEmpty {
+                Text(card.key)
+                    .font(.system(size: Size.key, weight: .bold))
+            }
+            if !card.tidy.isEmpty {
+                Text(card.tidy)
+                    .font(.system(size: Size.tidy))
+            }
+            if !card.unsure.isEmpty {
+                Text(card.unsure.joined(separator: "　"))
+                    .font(.caption)
+                    .foregroundStyle(Self.unsureOrange)
+            }
+        }
+    }
+
+    /// 逐字稿一律顯示（整理到＝改好的全文，綠字點了看原字；否則 Whisper 原字），原稿預設收起來
+    @ViewBuilder
+    private var transcript: some View {
+        if !card.transcriptText.isEmpty {
+            Text(styled)
+                .font(.system(size: Size.text))
+                .lineSpacing(3)
+                .tint(LiveText.fixGreen)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .environment(\.openURL, OpenURLAction { url in
+                    guard url.scheme == "cardfix", let group = Int(url.lastPathComponent) else { return .systemAction }
+                    if shown.contains(group) {
+                        shown.remove(group)
+                    } else {
+                        shown.insert(group)
+                    }
+                    return .handled
+                })
+        }
+        if card.state == .done, !card.raw.isEmpty, card.raw != card.transcriptText {
+            Button {
+                rawOpen.toggle()
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: rawOpen ? "chevron.down" : "chevron.right")
+                        .font(.caption2)
+                    Text("原始轉錄")
+                        .font(.caption)
+                }
+                .foregroundStyle(.secondary)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(rawOpen ? "收合原始轉錄" : "展開原始轉錄")
+            if rawOpen {
+                Text(CardDiff.lines(card.raw))
+                    .font(.system(size: Size.time))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
         }
     }
 
@@ -347,17 +398,20 @@ struct ResultCardsSheet: View {
     @State private var cards: [LiveCard] = []
     @State private var diffs: [Int: [CardDiff.Piece]] = [:]
     @State private var slides: SlideRef?
+    @State private var width: CGFloat = 0
 
     var body: some View {
         NavigationStack {
             ScrollView {
-                LazyVStack(alignment: .leading, spacing: 12) {
+                LazyVStack(alignment: .leading, spacing: 22) {
                     ForEach(cards) { card in
-                        LiveCardView(card: card, diff: diffs[card.id], slides: slides)
+                        LiveCardView(card: card, diff: diffs[card.id], slides: slides,
+                                     wide: LiveCardView.isWide(width - 32))
                     }
                 }
                 .padding(16)
             }
+            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
             .background(Color.white)
             .navigationTitle(run.displayTitle)
             .navigationBarTitleDisplayMode(.inline)

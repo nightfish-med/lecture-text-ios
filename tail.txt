@@ -1,0 +1,30 @@
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsmetadataprocessor --toolchain-dir /var/run/com.apple.security.cryptexd/mnt/com.apple.MobileAsset.MetalToolchain-v17.6.109.0.O5h86N/Metal.xctoolchain --module-name LectureText --sdk-root /Applications/Xcode_26.6.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.5.sdk --xcode-version 17F113 --platform-family iOS --deployment-target 26.0 --bundle-identifier com.lecturetext.LectureText --output /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app --target-triple arm64-apple-ios26.0 --binary-file /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/LectureText --dependency-file /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/Objects-normal/arm64/LectureText_dependency_info.dat --stringsdata-file /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/Objects-normal/arm64/ExtractedAppShortcutsMetadata.stringsdata --source-file-list /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/Objects-normal/arm64/LectureText.SwiftFileList --metadata-file-list /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/LectureText.DependencyMetadataFileList --static-metadata-file-list /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/LectureText.DependencyStaticMetadataFileList --swift-const-vals-list /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/Objects-normal/arm64/LectureText.SwiftConstValuesFileList --compile-time-extraction --deployment-aware-processing --validate-assistant-intents --no-app-shortcuts-localization
+2026-11-13 06:38:25.470 appintentsmetadataprocessor[13484:40111] Starting appintentsmetadataprocessor export
+2026-11-13 06:38:25.474 appintentsmetadataprocessor[13484:40111] warning: Metadata extraction skipped. No AppIntents.framework dependency found.
+
+GenerateDSYMFile /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app.dSYM /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/LectureText (in target 'LectureText' from project 'LectureText')
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/dsymutil /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/LectureText -o /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app.dSYM
+
+AppIntentsSSUTraining (in target 'LectureText' from project 'LectureText')
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    /Applications/Xcode_26.6.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/appintentsnltrainingprocessor --infoplist-path /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/Info.plist --temp-dir-path /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/ssu --bundle-id com.lecturetext.LectureText --product-path /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app --extracted-metadata-path /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/Metadata.appintents --metadata-file-list /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Intermediates.noindex/LectureText.build/Release-iphoneos/LectureText.build/LectureText.DependencyMetadataFileList --source-file /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app/Info.plist --archive-ssu-assets
+2026-11-13 06:38:25.512 appintentsnltrainingprocessor[13490:40121] Parsing options for appintentsnltrainingprocessor
+2026-11-13 06:38:25.513 appintentsnltrainingprocessor[13490:40121] Starting AppIntents SSU YAML Generation
+2026-11-13 06:38:25.518 appintentsnltrainingprocessor[13490:40121] No AppShortcuts found - Skipping.
+
+RegisterExecutionPolicyException /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app (in target 'LectureText' from project 'LectureText')
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    builtin-RegisterExecutionPolicyException /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app
+
+Validate /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app (in target 'LectureText' from project 'LectureText')
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    builtin-validationUtility /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app -shallow-bundle -infoplist-subpath Info.plist
+
+Touch /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app (in target 'LectureText' from project 'LectureText')
+    cd /Users/runner/work/lecture-text-ios/lecture-text-ios
+    /usr/bin/touch -c /Users/runner/work/lecture-text-ios/lecture-text-ios/build/Build/Products/Release-iphoneos/LectureText.app
+
+** BUILD SUCCEEDED **
+

@@ -1,0 +1,3 @@
+Xcode 26.6
+Build version 17F113
+	iOS 26.5                      	-sdk iphoneos26.5

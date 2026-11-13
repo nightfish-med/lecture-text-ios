@@ -1,0 +1,30 @@
+Command line invocation:
+    /Applications/Xcode_26.6.app/Contents/Developer/usr/bin/xcodebuild -resolvePackageDependencies -project LectureText.xcodeproj -scheme LectureText -derivedDataPath build
+
+Resolve Package Graph
+
+Fetching from https://github.com/FluidInference/FluidAudio
+
+Fetching from https://github.com/argmaxinc/argmax-oss-swift
+
+Fetching from https://github.com/apple/swift-argument-parser.git
+
+Creating working copy of package ‘swift-argument-parser’
+
+Checking out 1.8.2 of package ‘swift-argument-parser’
+
+Creating working copy of package ‘FluidAudio’
+
+Checking out 0.18.2 of package ‘FluidAudio’
+
+Creating working copy of package ‘argmax-oss-swift’
+
+Checking out 1.1.1 of package ‘argmax-oss-swift’
+
+
+Resolved source packages:
+  FluidAudio: https://github.com/FluidInference/FluidAudio @ 0.18.2
+  swift-argument-parser: https://github.com/apple/swift-argument-parser.git @ 1.8.2
+  argmax-oss-swift: https://github.com/argmaxinc/argmax-oss-swift @ 1.1.1
+
+resolved source packages: FluidAudio, swift-argument-parser, argmax-oss-swift

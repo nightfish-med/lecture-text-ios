@@ -24,7 +24,7 @@ jobs:
         run: |
           set -o pipefail
           mkdir -p out
-          swiftc Sources/TextShaping.swift Sources/Schedule.swift Sources/LinkProtocol.swift Sources/RecordWatch.swift Sources/ClassRecord.swift Sources/LiveFix.swift Sources/SlidePages.swift Sources/HaikuPromptText.swift Sources/HaikuFix.swift Sources/ReviewPlan.swift Sources/DrivePlan.swift Sources/LabPlan.swift Sources/WhisperPlan.swift Sources/LiveCutPlan.swift Sources/LiveCards.swift tools/shape_check/haiku_tests.swift tools/shape_check/review_tests.swift tools/shape_check/drive_tests.swift tools/shape_check/whisper_tests.swift tools/shape_check/livecut_tests.swift tools/shape_check/cards_tests.swift tools/shape_check/recover_tests.swift tools/shape_check/main.swift -o shape_check 2>&1 | tee out/shape_check.log
+          swiftc Sources/TextShaping.swift Sources/Schedule.swift Sources/LinkProtocol.swift Sources/RecordWatch.swift Sources/ClassRecord.swift Sources/LiveFix.swift Sources/SlidePages.swift Sources/HaikuPromptText.swift Sources/HaikuFix.swift Sources/ReviewPlan.swift Sources/DrivePlan.swift Sources/LabPlan.swift Sources/WhisperPlan.swift Sources/LiveCutPlan.swift Sources/LiveCards.swift Sources/SceneCards.swift tools/shape_check/haiku_tests.swift tools/shape_check/review_tests.swift tools/shape_check/drive_tests.swift tools/shape_check/whisper_tests.swift tools/shape_check/livecut_tests.swift tools/shape_check/cards_tests.swift tools/shape_check/recover_tests.swift tools/shape_check/scene_tests.swift tools/shape_check/main.swift -o shape_check 2>&1 | tee out/shape_check.log
           ./shape_check | tee -a out/shape_check.log
       - name: 擋「同一句又讀又寫同一個屬性」（v0.14.16 定稿閃退就是 run?.x = f(run?.x)，編譯器抓不到，執行時直接閃退）
         shell: bash
@@ -57,7 +57,7 @@ jobs:
           BN=$(( ${{ github.run_number }} + 41 ))
           echo "$BN" > out/build_number.txt
           sed -i '' "s/CFBundleVersion: .*/CFBundleVersion: \"$BN\"/" project.yml
-          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.26.4"/' project.yml
+          sed -i '' 's/CFBundleShortVersionString: .*/CFBundleShortVersionString: "0.27.0"/' project.yml
           xcodegen generate
       - name: 先抓套件（GitHub 下載偶爾回 504，失敗等 30 秒重試）
         shell: bash

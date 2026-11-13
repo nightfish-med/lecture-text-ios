@@ -522,6 +522,8 @@ struct SavedRun: Codable {
     var origin: String? = nil
     /// v0.21 起：每段錄音按下的時間（yyyyMMdd-HHmmss，和 parts 一一對應），原始轉錄每段一個區塊用。舊稿沒有，從各步紀錄找。
     var partStamps: [String]? = nil
+    /// v0.27.0 起：錄音時的場景（lecture／discussion／chat，RecordScene）；nil＝舊稿或選來的檔
+    var scene: String? = nil
 
     /// 畫面最上面的標題：改過的 → 「11/10 幾何」（照課表）→ 「11/10 10:20」（App 錄的、不在上課時段）→ 選來的檔用原檔名。
     var displayTitle: String {

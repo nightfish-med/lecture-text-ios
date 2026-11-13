@@ -117,19 +117,31 @@ struct ContentView: View {
 
 private struct StartView: View {
     let model: AppModel
+    /// v0.27.0：討論會開始前的提醒（App 內的確認，不是系統警告框）
+    @State private var confirmScene = false
 
     var body: some View {
         Spacer()
         HStack(spacing: 40) {
             RoundIcon(systemName: "mic.fill", label: "錄音", size: 96) {
-                model.recordButtonTapped()
+                if model.needsSceneConfirm {
+                    confirmScene = true
+                } else {
+                    model.recordButtonTapped()
+                }
+            }
+            .confirmationDialog(RecordScene.confirmTitle, isPresented: $confirmScene, titleVisibility: .visible) {
+                Button("開始錄音") {
+                    model.recordButtonTapped()
+                }
+                Button("取消", role: .cancel) {}
             }
             RoundIcon(systemName: "folder", label: "選檔案", size: 96) {
                 model.showImporter = true
             }
         }
         HStack(spacing: 20) {
-            SpeakerMenu(model: model, size: 56)
+            SceneMenu(model: model, size: 56)
             FixMenu(model: model, size: 56)
             // v0.15：掃電腦的 QR 碼，手機當電腦的麥克風（手機這邊不轉文字）
             RoundIcon(systemName: "laptopcomputer", label: "連電腦", size: 56) {
@@ -144,6 +156,8 @@ private struct StartView: View {
         }
         VStack(spacing: 0) {
             Text(model.warmNote)
+            // v0.27.0：下一場的場景
+            Text("場景：\(model.scene.title)（\(model.scene.detail)）")
             Text(model.versionLine)
             // 收起之後要知道稿去哪了
             // v0.23.2：iPad 上是「我的 iPad」
@@ -438,6 +452,8 @@ private struct ResultView: View {
     @State private var draftTitle = ""
     /// v0.26.1：模式 1 的場的卡片清單（可分享、拖到別的 App）
     @State private var showCards = false
+    /// v0.27.0：討論會續錄前的提醒
+    @State private var confirmContinue = false
     /// v0.26.1：iPad 視窗很矮
     @Environment(\.shortWindow) private var short
 
@@ -566,7 +582,17 @@ private struct ResultView: View {
             }
             // 結果畫面左下角的麥克風＝接著這一場錄。錄新的一場要先按 ✕ 回開始畫面
             RoundIcon(systemName: "mic.fill", label: "繼續錄", size: size, badge: .symbol("plus")) {
-                model.continueRecording()
+                if model.needsSceneConfirm {
+                    confirmContinue = true
+                } else {
+                    model.continueRecording()
+                }
+            }
+            .confirmationDialog(RecordScene.confirmTitle, isPresented: $confirmContinue, titleVisibility: .visible) {
+                Button("開始錄音") {
+                    model.continueRecording()
+                }
+                Button("取消", role: .cancel) {}
             }
             // v0.16：電腦傳來的稿沒有手機的錄音，不能接著錄（按了也只會說明）
             .opacity(model.run?.origin == nil ? 1 : 0.3)
@@ -576,7 +602,7 @@ private struct ResultView: View {
             RoundIcon(systemName: "text.alignleft", label: "用蘋果 AI 分段", size: size) {
                 model.arrangeWithAppleAI()
             }
-            SpeakerMenu(model: model, size: size)
+            SceneMenu(model: model, size: size)
             FixMenu(model: model, size: size)
             // v0.26.1：模式 1 的場：看卡片、分享到別的 App
             if hasCards {
@@ -996,34 +1022,44 @@ struct FailureLine: View {
     }
 }
 
-/// 情境決定分幾個人。下一次錄音或選檔才生效。
-private struct SpeakerMenu: View {
+/// v0.27.0 場景：上課／討論會／聊天（取代原本的「情境（人數）」和「即時模式」）。討論會、聊天可以再選人數。
+/// 下一次錄音或選檔才生效（選檔的分人人數也照這個）。
+private struct SceneMenu: View {
     let model: AppModel
     let size: CGFloat
 
     var body: some View {
         Menu {
-            Picker("情境", selection: Binding(get: { model.speakerMode }, set: { model.speakerMode = $0 })) {
-                Text("單人、上課（不分人）").tag(0)
-                Text("兩人對談（2 人）").tag(2)
-                Text("3 人").tag(3)
-                Text("4 人").tag(4)
-                Text("5 人").tag(5)
-                Text("6 人").tag(6)
-                Text("8 人").tag(8)
-                Text("10 人").tag(10)
-                Text("多人聊天、討論會（自動，人數可能少算）").tag(-1)
+            Picker("場景", selection: Binding(get: { model.scene }, set: { model.scene = $0 })) {
+                ForEach(RecordScene.allCases, id: \.self) { scene in
+                    Label("\(scene.title)：\(scene.detail)", systemImage: scene.symbol).tag(scene)
+                }
+            }
+            if model.scene != .lecture {
+                Picker("人數", selection: Binding(get: { model.speakerMode }, set: { model.setSceneSpeakers($0) })) {
+                    Text("自動（人數可能少算）").tag(-1)
+                    Text("2 人").tag(2)
+                    Text("3 人").tag(3)
+                    Text("4 人").tag(4)
+                    Text("5 人").tag(5)
+                    Text("6 人").tag(6)
+                    Text("8 人").tag(8)
+                    Text("10 人").tag(10)
+                }
+                .pickerStyle(.menu)
             }
         } label: {
-            // 單人、校正關這類狀態用圖示表示：1 人、2 人、多人＋角落數字、多人自動＋問號
-            switch model.speakerMode {
-            case 0: RoundGlyph(systemName: "person", size: size)
-            case 2: RoundGlyph(systemName: "person.2", size: size)
-            case -1: RoundGlyph(systemName: "person.3", size: size, badge: .text("?"))
-            default: RoundGlyph(systemName: "person.3", size: size, badge: .text("\(model.speakerMode)"))
+            // 場景用圖示表示；討論會、聊天的人數放角落（自動＝問號）
+            switch model.scene {
+            case .lecture:
+                RoundGlyph(systemName: model.scene.symbol, size: size)
+            case .discussion, .chat:
+                RoundGlyph(systemName: model.scene.symbol, size: size,
+                           badge: .text(model.speakerMode < 0 ? "?" : "\(model.speakerMode)"))
             }
         }
-        .accessibilityLabel("情境，現在是\(model.speakerModeLabel)")
+        .menuOrder(.fixed)
+        .accessibilityLabel("場景，現在是\(model.scene.title)、\(model.speakerModeLabel)")
     }
 }
 

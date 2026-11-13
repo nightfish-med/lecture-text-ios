@@ -1033,6 +1033,8 @@ liveCutTests(check)
 cardsTests(check)
 // v0.26.1 打斷後快速重試接回麥克風的排程、麥克風共用：tools/shape_check/recover_tests.swift
 recoverTests(check)
+// v0.27.0 場景、點一下改字、Pencil 圈起來重查、左右欄寬度、討論會停止後分人：tools/shape_check/scene_tests.swift
+sceneTests(check)
 
 print(failed == 0 ? "全部通過" : "失敗 \(failed) 項")
 exit(failed == 0 ? 0 : 1)

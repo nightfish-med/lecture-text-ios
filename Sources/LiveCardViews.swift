@@ -3,17 +3,33 @@ import UIKit
 import UniformTypeIdentifiers
 
 // v0.26.0 即時模式 1 錄音畫面：由上而下一張張卡（每 60 秒一張），下面接還沒進卡的字。
-// 每張卡：時間＋頁碼、一句重點、整理版、不確定的詞、逐字稿（一律顯示，改過的字綠色，點了才看原字）、「原始轉錄」（預設收起來）。
+// 每張卡：時間＋頁碼、一句重點、整理版、不確定的詞、逐字稿（一律顯示，改過的字綠色）、「原始轉錄」（預設收起來）。
 // v0.26.4：寬＝左逐字稿、右重點卡；窄＝一欄，重點在段落上方。字級 22／15／13／11。
-// 卡片的資料、比對在 LiveCards.swift（純邏輯，shape_check 測）；這個檔只畫。
+// v0.27.0：寬的時候中間有把手可以左右拉（記住比例）；逐字稿一句一行，點一下那行＝改字（看得到原本聽到的）；
+// Apple Pencil 圈起來＝那幾行送 Haiku 上網重查，結果放在右邊重點卡的「重查」。手指照常捲動。
+// 卡片的資料、比對、行的切法在 LiveCards.swift、SceneCards.swift（純邏輯，shape_check 測）；這個檔只畫。
+
+/// 點一行要改的那一行
+struct LineEditRequest: Identifiable {
+    let id = UUID()
+    let cardID: Int
+    let line: Int
+    let current: String
+    let original: String
+}
 
 /// 卡片清單＋下面的即時字。使用者原本在底部才自動捲到底（往上看舊卡時不跳）。
 struct LiveCardsView: View {
     let model: AppModel
     let review: LiveReviewer
     @State private var atBottom = true
-    /// v0.26.4：畫面寬度（≥ 700 點＝左右兩欄）
-    @State private var width: CGFloat = 0
+    /// v0.26.4：畫面大小（寬 ≥ 700 點＝左右兩欄）
+    @State private var size: CGSize = .zero
+    /// v0.27.0：右欄佔整寬的比例（0＝沒拉過，用 300 點）；所有卡片、下面的即時字都照這個
+    @AppStorage("cardRightRatio") private var rightRatio: Double = 0
+    @State private var dragStart: Double?
+    /// v0.27.0：點一行要改的
+    @State private var editing: LineEditRequest?
 
     /// 捲動位置（只比這三個數字）
     private struct Spot: Equatable {
@@ -21,6 +37,9 @@ struct LiveCardsView: View {
         var visible: CGFloat
         var content: CGFloat
     }
+
+    private var wide: Bool { LiveCardView.isWide(size.width) }
+    private var right: Double { CardSplit.right(total: Double(size.width), ratio: rightRatio) }
 
     var body: some View {
         ScrollViewReader { proxy in
@@ -37,18 +56,26 @@ struct LiveCardsView: View {
                     ForEach(review.cards) { card in
                         LiveCardView(card: card, diff: review.diffs[card.id],
                                      slides: SlideRef(course: review.course, source: review.log.slides),
-                                     wide: LiveCardView.isWide(width))
+                                     wide: wide, rightWidth: CGFloat(right),
+                                     onEdit: { index, line in
+                                         editing = LineEditRequest(cardID: card.id, line: index, current: line.text, original: line.original)
+                                     },
+                                     onCircle: { rows in
+                                         review.recheck(cardID: card.id, lines: rows)
+                                     })
                     }
                     // 寬的時候即時字只佔左欄（和逐字稿對齊）
                     LiveCardsTail(model: model, review: review)
-                        .padding(.trailing, LiveCardView.isWide(width) ? 320 : 0)
+                        .padding(.trailing, wide ? CGFloat(right + CardSplit.gap) : 0)
                     Color.clear
                         .frame(height: 1)
                         .id(Self.bottomID)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // v0.27.0：Pencil 不捲動（留給圈字），手指、觸控板照常捲
+                .background(PencilScrollGuard())
             }
-            .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size = $0 }
             // v0.26.2：一打開在底部；內容比畫面短時從上面排（不再上面留一大片白）
             .defaultScrollAnchor(.bottom, for: .initialOffset)
             .defaultScrollAnchor(.top, for: .alignment)
@@ -75,10 +102,246 @@ struct LiveCardsView: View {
                     }
                 }
             }
+            .overlay(alignment: .topLeading) {
+                if wide {
+                    splitHandle
+                }
+            }
+        }
+        .sheet(item: $editing) { request in
+            LineEditSheet(request: request) { text in
+                review.editLine(cardID: request.cardID, line: request.line, before: request.current, after: text)
+            }
         }
     }
 
+    /// v0.27.0 左右欄中間的把手：拉動改右欄寬度（兩邊都有最小寬度），放開記住比例
+    private var splitHandle: some View {
+        let center = Double(size.width) - right - CardSplit.gap / 2
+        return ZStack {
+            if dragStart != nil {
+                Rectangle()
+                    .fill(Color(.separator))
+                    .frame(width: 1, height: max(0, size.height))
+                    .allowsHitTesting(false)
+            }
+            Capsule()
+                .fill(Color(.systemGray3))
+                .frame(width: 6, height: 48)
+                .frame(width: 28, height: 120)
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 1, coordinateSpace: .global)
+                        .onChanged { value in
+                            let start = dragStart ?? right
+                            if dragStart == nil { dragStart = start }
+                            rightRatio = CardSplit.ratio(right: start - Double(value.translation.width), total: Double(size.width))
+                        }
+                        .onEnded { _ in
+                            dragStart = nil
+                        }
+                )
+                .accessibilityLabel("左右欄的分隔，拉動調整寬度")
+        }
+        .frame(width: 28, height: max(120, size.height))
+        .offset(x: CGFloat(center) - 14)
+    }
+
     private static let bottomID = "cards-bottom"
+}
+
+/// v0.27.0 點一行的改字畫面：上面灰字是原本聽到的（Whisper），下面改；「改」才存
+struct LineEditSheet: View {
+    let request: LineEditRequest
+    let save: (String) -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+
+    init(request: LineEditRequest, save: @escaping (String) -> Void) {
+        self.request = request
+        self.save = save
+        _text = State(initialValue: request.current)
+    }
+
+    var body: some View {
+        NavigationStack {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("原本聽到的（Whisper）")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text(request.original.isEmpty ? "（沒有）" : request.original)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+                TextField("這一行", text: $text, axis: .vertical)
+                    .font(.body)
+                    .lineLimit(1...6)
+                    .textFieldStyle(.roundedBorder)
+                    .padding(.top, 6)
+                Spacer(minLength: 0)
+            }
+            .padding(16)
+            .navigationTitle("改這一行")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("取消") {
+                        dismiss()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("改") {
+                        save(text)
+                        dismiss()
+                    }
+                    .disabled(text == request.current)
+                }
+            }
+        }
+        .presentationDetents([.medium])
+    }
+}
+
+/// v0.27.0：所在的捲動區 Pencil 不捲動（只認手指、滑鼠、觸控板），Pencil 留給圈字。不擋任何點按。
+private struct PencilScrollGuard: UIViewRepresentable {
+    func makeUIView(context: Context) -> GuardView {
+        let view = GuardView()
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ view: GuardView, context: Context) {
+        view.apply()
+    }
+
+    final class GuardView: UIView {
+        override func didMoveToWindow() {
+            super.didMoveToWindow()
+            apply()
+        }
+
+        func apply() {
+            var next = superview
+            while let view = next {
+                if let scroll = view as? UIScrollView {
+                    scroll.panGestureRecognizer.allowedTouchTypes = [
+                        UITouch.TouchType.direct, UITouch.TouchType.indirect, UITouch.TouchType.indirectPointer,
+                    ].map { NSNumber(value: $0.rawValue) }
+                    return
+                }
+                next = view.superview
+            }
+        }
+    }
+}
+
+/// v0.27.0：Apple Pencil 的筆觸（只認 Pencil；手指照常點、捲）。座標是掛上去那個畫面自己的座標。
+private struct PencilStrokeGesture: UIGestureRecognizerRepresentable {
+    let onPoint: (CGPoint, Bool) -> Void
+    let onEnd: (Bool) -> Void
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.allowedTouchTypes = [NSNumber(value: UITouch.TouchType.pencil.rawValue)]
+        pan.maximumNumberOfTouches = 1
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ recognizer: UIPanGestureRecognizer, context: Context) {
+        let point = context.converter.localLocation
+        switch recognizer.state {
+        case .began:
+            onPoint(point, true)
+        case .changed:
+            onPoint(point, false)
+        case .ended:
+            onPoint(point, false)
+            onEnd(true)
+        default:
+            onEnd(false)
+        }
+    }
+}
+
+/// 有給圈字的動作才掛 Pencil 手勢（結果畫面的卡片只看不改）
+private struct PencilStrokeModifier: ViewModifier {
+    let enabled: Bool
+    let onPoint: (CGPoint, Bool) -> Void
+    let onEnd: (Bool) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            content.gesture(PencilStrokeGesture(onPoint: onPoint, onEnd: onEnd))
+        } else {
+            content
+        }
+    }
+}
+
+/// v0.27.0 右邊重點卡的「重查」：結論 → 為什麼 → 來源（點了開 Safari）→ 逐字稿已改 → 沒把握（橘）。等的時候轉圈圈。
+private struct RecheckView: View {
+    let item: CardRecheck
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("重查")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            switch item.state {
+            case .waiting:
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(item.note ?? "上網查資料中…")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            case .failed:
+                Text(item.note ?? "沒查到")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            case .done:
+                if let conclusion = item.conclusion, !conclusion.isEmpty {
+                    Text(conclusion)
+                        .font(.system(size: LiveCardView.Size.tidy, weight: .semibold))
+                }
+                if let why = item.why, !why.isEmpty {
+                    Text(why)
+                        .font(.footnote)
+                }
+                if let sources = item.sources, !sources.isEmpty {
+                    Text("來源")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 2)
+                    ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
+                        if let url = URL(string: source.url) {
+                            Link(destination: url) {
+                                Text(source.title)
+                                    .font(.caption)
+                                    .lineLimit(2)
+                                    .multilineTextAlignment(.leading)
+                            }
+                        }
+                    }
+                }
+                ForEach(Array((item.applied ?? []).enumerated()), id: \.offset) { _, fix in
+                    Text("逐字稿已改：\(fix.old) → \(fix.new.isEmpty ? "（刪掉）" : fix.new)")
+                        .font(.caption)
+                        .foregroundStyle(LiveText.fixGreen)
+                }
+                if let unsure = item.unsure, !unsure.isEmpty {
+                    Text("沒把握：\(unsure)")
+                        .font(.caption)
+                        .foregroundStyle(LiveCardView.unsureOrange)
+                }
+            }
+        }
+        .padding(.top, 6)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
 }
 
 /// 還沒進卡的 Whisper 字（深灰）＋ Apple 灰字（淺灰）
@@ -188,21 +451,30 @@ struct LiveCardView: View {
     let diff: [CardDiff.Piece]?
     /// v0.26.1：分享時畫哪份投影片；nil＝只送文字
     var slides: SlideRef? = nil
-    @State private var anchor = ShareAnchorBox()
-    /// v0.26.2：原稿預設收起來（完整文字另外一律顯示）；點「原稿」展開
-    @State private var rawOpen = false
-    /// 點開看原字的那幾組
-    @State private var shown: Set<Int> = []
-
-    static let unsureOrange = Color(red: 0.78, green: 0.40, blue: 0.0)
-
     /// v0.26.4：寬（iPad 全螢幕）＝左逐字稿、右重點卡；窄（分割畫面、手機）＝一欄，重點在段落上方
     var wide = false
+    /// v0.27.0：右欄寬度（中間把手拉的）
+    var rightWidth: CGFloat = 300
+    /// v0.27.0：點一行＝改字（nil＝只看，例如結果畫面）
+    var onEdit: ((Int, CardLine) -> Void)? = nil
+    /// v0.27.0：Pencil 圈起來的行＝重查（nil＝不能圈）
+    var onCircle: (([Int]) -> Void)? = nil
+    @State private var anchor = ShareAnchorBox()
+    /// v0.26.2：原稿預設收起來（完整文字另外一律顯示）；點「原始轉錄」展開
+    @State private var rawOpen = false
+    /// v0.27.0：每行的位置（這張卡逐字稿欄的座標）、Pencil 正在畫的點、畫到的行
+    @State private var boxes: [Int: CGRect] = [:]
+    @State private var stroke: [CGPoint] = []
+    @State private var circled: Set<Int> = []
+
+    static let unsureOrange = Color(red: 0.78, green: 0.40, blue: 0.0)
+    /// 圈到的行、重查中的行的淡底色
+    static let circleBack = Color(red: 1.0, green: 0.62, blue: 0.2).opacity(0.16)
 
     var body: some View {
         Group {
             if wide {
-                HStack(alignment: .top, spacing: 20) {
+                HStack(alignment: .top, spacing: CGFloat(CardSplit.gap)) {
                     VStack(alignment: .leading, spacing: 4) {
                         header
                         transcript
@@ -210,14 +482,16 @@ struct LiveCardView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     VStack(alignment: .leading, spacing: 6) {
                         keyBlock
+                        rechecks
                     }
                     .padding(14)
-                    .frame(width: 300, alignment: .leading)
+                    .frame(width: rightWidth, alignment: .leading)
                     .background(RoundedRectangle(cornerRadius: 12).fill(Color(.systemGray6)))
                 }
             } else {
                 VStack(alignment: .leading, spacing: 4) {
                     keyBlock
+                    rechecks
                     header
                     transcript
                 }
@@ -232,7 +506,7 @@ struct LiveCardView: View {
     }
 
     /// v0.26.4 字級（他 11/13 定：重點大、逐字稿小）：重點 22 粗 → 整理版 15 → 逐字稿 13 → 時間 11
-    /// 寬度夠放左右兩欄嗎（右欄 300 點＋間距，左欄至少約 380 點）
+    /// 寬度夠放左右兩欄嗎（右欄最少 220 點＋間距，左欄至少約 300 點）
     static func isWide(_ width: CGFloat) -> Bool { width >= 700 }
 
     enum Size {
@@ -306,24 +580,58 @@ struct LiveCardView: View {
         }
     }
 
-    /// 逐字稿一律顯示（整理到＝改好的全文，綠字點了看原字；否則 Whisper 原字），原稿預設收起來
+    /// v0.27.0 重查結果（一次一段，依先後）
+    @ViewBuilder
+    private var rechecks: some View {
+        if let list = card.rechecks, !list.isEmpty {
+            ForEach(list) { item in
+                RecheckView(item: item)
+            }
+        }
+    }
+
+    /// 這張卡逐字稿欄的座標名字
+    private var space: String { "card-text-\(card.id)" }
+
+    /// 淡底色的行：Pencil 正在圈的、送出去還在查的
+    private var highlighted: Set<Int> {
+        var rows = circled
+        for item in card.rechecks ?? [] where item.state == .waiting {
+            rows.formUnion(item.lines)
+        }
+        return rows
+    }
+
+    /// 逐字稿一律顯示，一句一行（整理到＝改好的全文、綠字是改過的；否則 Whisper 原字）；原稿預設收起來
     @ViewBuilder
     private var transcript: some View {
-        if !card.transcriptText.isEmpty {
-            Text(styled)
-                .font(.system(size: Size.text))
-                .lineSpacing(3)
-                .tint(LiveText.fixGreen)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .environment(\.openURL, OpenURLAction { url in
-                    guard url.scheme == "cardfix", let group = Int(url.lastPathComponent) else { return .systemAction }
-                    if shown.contains(group) {
-                        shown.remove(group)
-                    } else {
-                        shown.insert(group)
-                    }
-                    return .handled
-                })
+        let lines = CardLines.build(card, diff: diff)
+        if !lines.isEmpty {
+            VStack(alignment: .leading, spacing: 3) {
+                ForEach(Array(lines.enumerated()), id: \.offset) { index, line in
+                    lineView(index, line)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .coordinateSpace(.named(space))
+            .overlay(alignment: .topLeading) {
+                strokePath
+            }
+            .modifier(PencilStrokeModifier(enabled: onCircle != nil, onPoint: { point, begin in
+                if begin {
+                    stroke = [point]
+                } else {
+                    stroke.append(point)
+                }
+                circled = Set(hitRows())
+            }, onEnd: { committed in
+                let rows = committed ? hitRows() : []
+                stroke = []
+                circled = []
+                if !rows.isEmpty {
+                    onCircle?(rows)
+                }
+            }))
         }
         if card.state == .done, !card.raw.isEmpty, card.raw != card.transcriptText {
             Button {
@@ -349,45 +657,82 @@ struct LiveCardView: View {
         }
     }
 
-    /// 原稿區的字：整理到的卡＝擴寫全文（一句一行），改過的字綠色、純刪除的地方一個小紅點；點了在後面顯示原字（刪除線、小一號、灰）
-    private var styled: AttributedString {
-        guard card.state == .done, !card.expanded.isEmpty, let diff, !diff.isEmpty else {
-            return AttributedString(CardDiff.lines(card.transcriptText))
+    private func lineView(_ index: Int, _ line: CardLine) -> some View {
+        Text(Self.styled(line))
+            .font(.system(size: Size.text))
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.vertical, 1)
+            .background(highlighted.contains(index) ? Self.circleBack : Color.clear)
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onEdit?(index, line)
+            }
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(space))
+            } action: { rect in
+                boxes[index] = rect
+            }
+            .accessibilityHint(onEdit == nil ? "" : "點一下改這一行")
+    }
+
+    /// Pencil 畫的時候一條淡橘線，放開就消失（不留筆跡）
+    private var strokePath: some View {
+        Path { path in
+            guard let first = stroke.first else { return }
+            path.move(to: first)
+            for point in stroke.dropFirst() {
+                path.addLine(to: point)
+            }
+        }
+        .stroke(Color.orange.opacity(0.7), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
+        .allowsHitTesting(false)
+    }
+
+    /// 筆跡的上下範圍蓋到哪幾行
+    private func hitRows() -> [Int] {
+        guard let first = stroke.first else { return [] }
+        var top = first.y, bottom = first.y
+        for point in stroke {
+            top = min(top, point.y)
+            bottom = max(bottom, point.y)
+        }
+        let list = boxes.map { LineBox(index: $0.key, top: Double($0.value.minY), bottom: Double($0.value.maxY)) }
+        return CardLines.hit(list, top: Double(top), bottom: Double(bottom))
+    }
+
+    /// 一行的字：改過的那段綠色（使用者改的、重查改的都是）；Haiku 擴寫改的字綠色；純刪除的地方一個小紅點
+    static func styled(_ line: CardLine) -> AttributedString {
+        if let from = line.editedFrom {
+            let frag = CardEdits.fragment(from, line.text)
+            var out = AttributedString(frag.prefix)
+            if frag.new.isEmpty, !frag.old.isEmpty {
+                var dot = AttributedString("•")
+                dot.foregroundColor = Color.red
+                out += dot
+            } else {
+                var middle = AttributedString(frag.new)
+                middle.foregroundColor = LiveText.fixGreen
+                out += middle
+            }
+            out += AttributedString(frag.suffix)
+            return out
         }
         var out = AttributedString()
-        for piece in diff {
+        for piece in line.pieces {
             switch piece.kind {
             case .same:
                 out += AttributedString(piece.text)
             case .changed:
                 var part = AttributedString(piece.text)
                 part.foregroundColor = LiveText.fixGreen
-                part.link = URL(string: "cardfix://g/\(piece.group)")
                 out += part
-                if shown.contains(piece.group), !piece.old.isEmpty {
-                    out += Self.original(piece.old)
-                }
             case .deleted:
-                // 連結的字會被套成 tint 色，用表情符號的紅點才保證是紅的
-                var dot = AttributedString("🔴")
-                dot.font = Font.system(size: 7)
-                dot.link = URL(string: "cardfix://g/\(piece.group)")
+                var dot = AttributedString("•")
+                dot.foregroundColor = Color.red
                 out += dot
-                if shown.contains(piece.group) {
-                    out += Self.original(piece.old)
-                }
             }
         }
         return out
-    }
-
-    /// 原字：刪除線、小一號、灰
-    private static func original(_ text: String) -> AttributedString {
-        var part = AttributedString(text)
-        part.foregroundColor = Color.gray
-        part.font = Font.footnote
-        part.strikethroughStyle = Text.LineStyle(pattern: .solid, color: Color.gray)
-        return part
     }
 }
 
@@ -399,6 +744,8 @@ struct ResultCardsSheet: View {
     @State private var diffs: [Int: [CardDiff.Piece]] = [:]
     @State private var slides: SlideRef?
     @State private var width: CGFloat = 0
+    /// v0.27.0：和錄音畫面同一個左右比例
+    @AppStorage("cardRightRatio") private var rightRatio: Double = 0
 
     var body: some View {
         NavigationStack {
@@ -406,7 +753,8 @@ struct ResultCardsSheet: View {
                 LazyVStack(alignment: .leading, spacing: 22) {
                     ForEach(cards) { card in
                         LiveCardView(card: card, diff: diffs[card.id], slides: slides,
-                                     wide: LiveCardView.isWide(width - 32))
+                                     wide: LiveCardView.isWide(width - 32),
+                                     rightWidth: CGFloat(CardSplit.right(total: Double(width - 32), ratio: rightRatio)))
                     }
                 }
                 .padding(16)

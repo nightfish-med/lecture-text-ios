@@ -66,15 +66,8 @@ struct HaikuMenu: View {
                     Text(line)
                 }
             }
-            // v0.24：即時模式（下一次錄音生效）
-            Section("即時模式（下一次錄音生效；Whisper 要先下載過模型）") {
-                Picker(selection: Binding(get: { model.liveMode }, set: { model.liveMode = $0 })) {
-                    ForEach(0..<AppModel.liveModeNames.count, id: \.self) { i in
-                        Text(AppModel.liveModeNames[i]).tag(i)
-                    }
-                } label: {
-                    Label("即時模式：\(AppModel.liveModeNames[min(max(model.liveMode, 0), 2)])", systemImage: "dial.medium")
-                }
+            // v0.24：即時模式；v0.27.0 起由開始畫面的場景（上課／討論會／聊天）決定，這裡不再選
+            Section("錄音（下一次錄音生效；上課、討論會要先下載過 Whisper 模型）") {
                 // v0.26.1：和別的 App 共用麥克風（例如另一個錄音 App 同時錄；iOS 沒保證兩邊都收得到）。下次錄音生效
                 Toggle(isOn: Binding(get: { model.micShared }, set: { model.micShared = $0 })) {
                     Label("麥克風和別的 App 共用", systemImage: "mic.badge.plus")
@@ -97,7 +90,8 @@ struct HaikuMenu: View {
                 .disabled(model.isBusy)
             }
         } label: {
-            RoundGlyph(systemName: "sparkles", size: size, slashed: model.haikuKeyLabel == nil)
+            // v0.27.0：不用星星圖示（像別家 AI 的標誌），改成「文字＋勾」
+            RoundGlyph(systemName: "text.badge.checkmark", size: size, slashed: model.haikuKeyLabel == nil)
         }
         // 0.23.3：照程式的順序排（iPad 上圓鈕在下半部時，系統把整個選單倒過來，金鑰跑到最下面）
         .menuOrder(.fixed)
@@ -153,7 +147,7 @@ private struct CourseSettingItems: View {
         Label(setting.slides.map { "投影片：\($0)" } ?? "投影片：還沒有", systemImage: "doc.richtext")
         if setting.allowed {
             Toggle(isOn: Binding(get: { setting.haiku }, set: { model.setHaiku($0, course: setting.course) })) {
-                Label("錄音中送 Haiku 改字", systemImage: "sparkles")
+                Label("錄音中送 Haiku 改字", systemImage: "text.badge.checkmark")
             }
         } else {
             Label("私人課程不送", systemImage: "lock")

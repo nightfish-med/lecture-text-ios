@@ -109,12 +109,45 @@ final class AppModel {
     var showImporter = false
     /// v0.15：開「連電腦」畫面（手機當電腦的麥克風）。
     var showLink = false
-    /// 情境決定人數。0＝單人、上課（不分人），2＝兩人對談，3 以上＝指定人數，-1＝多人但不知道幾個（自動）。
-    /// 預設單人：指定 2 人時單人錄音會被硬拆成假的 A、B，自動又會把兩人判成一人（真機實測），兩邊都不能當預設，所以由使用者選情境。
-    /// 用新的鍵：舊鍵可能存著 2，沿用就等於沒修。
-    var speakerMode: Int = UserDefaults.standard.object(forKey: "speakerScene") as? Int ?? 0 {
-        didSet { UserDefaults.standard.set(speakerMode, forKey: "speakerScene") }
+    /// v0.27.0 場景（錄音前選；下一次錄音生效）：上課＝卡片不分人、討論會＝卡片＋停止後分人、聊天＝不送 Haiku 只分人。
+    /// 取代原本分開的「情境（人數）」和「即時模式」兩個選單。
+    var scene: RecordScene = RecordScene(rawValue: UserDefaults.standard.string(forKey: "recordScene") ?? "") ?? .lecture {
+        didSet { UserDefaults.standard.set(scene.rawValue, forKey: "recordScene") }
     }
+    /// 討論會、聊天各自記住的人數（-1＝自動）
+    var discussionSpeakers: Int = UserDefaults.standard.object(forKey: "sceneSpeakers.discussion") as? Int ?? -1 {
+        didSet { UserDefaults.standard.set(discussionSpeakers, forKey: "sceneSpeakers.discussion") }
+    }
+    var chatSpeakers: Int = UserDefaults.standard.object(forKey: "sceneSpeakers.chat") as? Int ?? 2 {
+        didSet { UserDefaults.standard.set(chatSpeakers, forKey: "sceneSpeakers.chat") }
+    }
+    /// 人數照場景。0＝不分人（上課），2＝兩人，3 以上＝指定人數，-1＝多人但不知道幾個（自動）。選檔轉文字也照這個。
+    var speakerMode: Int {
+        switch scene {
+        case .lecture: return 0
+        case .discussion: return scene.speakers(stored: discussionSpeakers)
+        case .chat: return scene.speakers(stored: chatSpeakers)
+        }
+    }
+
+    func setSceneSpeakers(_ count: Int) {
+        switch scene {
+        case .lecture: break
+        case .discussion: discussionSpeakers = count
+        case .chat: chatSpeakers = count
+        }
+    }
+
+    /// 開始錄音前要不要先跳「討論會會送 Haiku」的提醒（有金鑰才會送）
+    var needsSceneConfirm: Bool {
+        scene.confirmsBeforeStart && haikuKeyLabel != nil
+    }
+
+    /// 這場錄音的場景、人數（按下錄音時定；停止後的分人用這個，不受之後切換影響）
+    @ObservationIgnored private var sessionScene: RecordScene = .lecture
+    @ObservationIgnored private var sessionSpeakers = 0
+    /// 新的一場要記的場景（選檔轉文字＝nil）
+    @ObservationIgnored private var sceneForRun: String?
     /// 校正。0＝關閉，1＝離線（蘋果 AI 挑可能的同音字，只標註，不上網），2＝智慧（蘋果 AI 挑詞，過 PrivacyGate 才查維基，只標註）。
     /// 校正維持只標註，不改稿。全校正要連 Claude，手機還沒有。預設關閉：準度還沒驗。
     var fixMode: Int = UserDefaults.standard.integer(forKey: "fixMode") {
@@ -123,9 +156,8 @@ final class AppModel {
     /// v0.24 即時模式（下一次錄音生效）。0＝Apple＋Haiku 15 秒一批（原本）；
     /// 1（v0.25）＝主稿用錄音中的 Whisper（約晚 15–20 秒），Whisper 還沒轉到的那一小段先用 Apple 灰字；Haiku 60 秒一批改 Whisper 稿、附 Apple 當證據；
     /// 2＝Apple＋Haiku 60 秒一批（不跑 Whisper，對照用）。
-    var liveMode: Int = UserDefaults.standard.integer(forKey: "liveMode") {
-        didSet { UserDefaults.standard.set(liveMode, forKey: "liveMode") }
-    }
+    /// v0.27.0：由場景決定（上課、討論會＝1；聊天＝0），不再有自己的選單
+    var liveMode: Int { scene.liveMode }
     static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Whisper 主稿＋Haiku 每 60 秒一張卡（重點、整理版、擴寫）", "Apple＋Haiku（60 秒一批，對照用）"]
     /// v0.26.1「麥克風和別的 App 共用」（預設關、記住上次；下一次按錄音才生效）
     var micShared: Bool = UserDefaults.standard.bool(forKey: MicShare.key) {
@@ -436,6 +468,10 @@ final class AppModel {
     private func startRecording(to target: URL?) {
         // v0.23.5：下課 Whisper 讓路給錄音（標記留著，停止後接著轉）
         whisper.pause("開始錄音")
+        // v0.27.0：這場的場景、人數按下時定
+        sessionScene = scene
+        sessionSpeakers = speakerMode
+        sceneForRun = scene.rawValue
         player.unload()
         anchor = nil
         let url = target ?? Store.recordingsFolder(course: pendingCourse).appendingPathComponent("\(Store.timestamp()).caf")
@@ -471,7 +507,7 @@ final class AppModel {
                 whisperMain = false
                 applePieces = []
                 appleVolatile = ""
-                if liveMode == 1, let current = run {
+                if sessionScene.liveMode == 1, let current = run {
                     let path = Store.reviewFile(of: current).path.replacingOccurrences(of: " 改字.json", with: " Whisper即時.txt")
                     let lw = LiveWhisper(offset: 0, saveTo: URL(fileURLWithPath: path))
                     lw.onPieces = { [weak self] new in
@@ -487,7 +523,7 @@ final class AppModel {
                 if let sim {
                     log("模擬上課：用選來的檔（.\(sim.pathExtension)）4 倍速當作錄音，Apple、Whisper、Haiku 照真的跑")
                 }
-                log("即時模式：\(Self.liveModeNames[min(max(liveMode, 0), 2)])")
+                log("場景：\(sessionScene.title)（人數 \(sessionSpeakers)）；即時模式：\(Self.liveModeNames[min(max(sessionScene.liveMode, 0), 2)])")
                 // v0.23.2：條件都符合（金鑰、課名、這門課開著、不是私人課程）才建審稿器；否則和 v0.22 一樣
                 startReviewer(course: nil)
                 UIApplication.shared.isIdleTimerDisabled = true
@@ -618,9 +654,21 @@ final class AppModel {
                 saveLiveDraft(draft)
             }
             finalDone = false
+            // v0.27.0 討論會：卡片模式停止後分人的結果（講者時間），補送完再套到卡片的字上
+            var cardTurns: [SpeakerTurn]?
             if whisperMain {
                 // v0.25 模式 1：主稿就是錄音中的 Whisper，不用 Apple 定稿換掉
                 log("即時模式 1：主稿用錄音中的 Whisper，不跑 Apple 定稿")
+                // v0.27.0 修：模式 1 以前停止後從不分人（分人只在 Apple 定稿那條路）。討論會在這裡分：
+                // 有卡片＝先只算講者時間，等卡片補送完再照每行的時間標 A／B；沒有卡片（沒金鑰等）＝直接標在 Whisper 的字上
+                if sessionSpeakers != 0, let url = liveURL {
+                    if review?.cardMode == true {
+                        cardTurns = await speakerTurns(audioURL: url, count: sessionSpeakers)
+                    } else {
+                        await labelSpeakers(audioURL: url, count: sessionSpeakers)
+                        keepWhatWeHave()
+                    }
+                }
                 phase = .idle
             } else if let url = liveURL {
                 await transcribe(audioURL: url, sourceName: url.lastPathComponent, draft: draft)
@@ -645,9 +693,12 @@ final class AppModel {
                 let done = finalDone
                 // v0.26.0 模式 1：續錄時原稿＋分隔行留著，只換這段（continuing 下面就清掉，先拿）
                 let head = continuing?.head ?? ""
+                let part = continuing?.part
+                let turns = cardTurns
                 Task {
                     let unsent = await flush.value
-                    let swapped = await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done, head: head)
+                    let swapped = await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done, head: head,
+                                                     turns: turns, part: part)
                     autoUpload(swapped ?? uploadRun, fallbackReport: uploadReport)
                     // v0.23.5：定稿、Haiku 補送都結束才開始下課 Whisper
                     stopFlowActive = false
@@ -837,6 +888,7 @@ final class AppModel {
         )
         // v0.21：第 1 段的開始＝錄音檔名的時間（按下錄音）；選來的檔用轉成文字的時間
         fresh.partStamps = [fresh.recordedStamp ?? fresh.startedStamp]
+        fresh.scene = sceneForRun
         run = fresh
     }
 
@@ -862,6 +914,7 @@ final class AppModel {
         continuing = nil
         // 選來的檔照舊用原檔名當標題，不照課表
         pendingCourse = nil
+        sceneForRun = nil
         player.unload()
         anchor = nil
         sessionLog = []
@@ -1283,7 +1336,8 @@ final class AppModel {
                 finalGuard.finish()   // 定稿完整了，才可以換掉即時稿
                 finalDone = true
                 keepWhatWeHave()   // 沒分人的稿先存，分人出事也留得住
-                await labelSpeakers(audioURL: readable)
+                // v0.27.0：錄音的定稿照這場的人數；選來的檔照現在的場景
+                await labelSpeakers(audioURL: readable, count: audioURL == liveURL ? sessionSpeakers : speakerMode)
                 keepWhatWeHave()
                 // v0.15：續錄不到 2 秒（多半是誤按）不跑校正：字太少，校了也只是多等、容易被收起打斷
                 if continuing != nil, result.audioSeconds < 2 {
@@ -1409,7 +1463,7 @@ final class AppModel {
 
     /// 分人失敗或中途停止都留著原稿，只在畫面上講原因。
     /// 續錄只分新的那段（不重分整場）：原稿的 A、B 不動，新段自己從 A 開始，兩段的 A、B 不一定是同一人。
-    private func labelSpeakers(audioURL: URL) async {
+    private func labelSpeakers(audioURL: URL, count speakerMode: Int) async {
         let fresh = Array(pieces.dropFirst(continuing?.basePieces.count ?? 0))
         guard speakerMode != 0, !fresh.isEmpty else { return }
         Store.crumb("分人")
@@ -1469,6 +1523,42 @@ final class AppModel {
         }
     }
 
+    /// v0.27.0 討論會（卡片模式）：只算講者時間（含續錄位移），字等卡片補送完再標。失敗或沒找到＝nil，稿照舊不分人。
+    private func speakerTurns(audioURL: URL, count: Int) async -> [SpeakerTurn]? {
+        Store.crumb("分人")
+        defer { Store.crumb(nil) }
+        phase = .separating(nil)
+        let started = Date()
+        let backgroundBefore = backgroundSeconds
+        let part = continuing?.part
+        do {
+            let readable = try await SpeechEngine.readableAudio(at: audioURL)
+            defer {
+                if readable != audioURL { try? FileManager.default.removeItem(at: readable) }
+            }
+            let result = try await SpeakerEngine.run(audioURL: readable, count: count > 0 ? count : nil) { [weak self] fraction in
+                guard let self, case .separating = self.phase else { return }
+                self.phase = .separating(fraction >= 1 ? nil : fraction)
+            }
+            try Task.checkCancellation()
+            let turns = PartJoin.shift(result.turns, by: continuing?.offset ?? 0, part: part)
+            guard !turns.isEmpty else {
+                log("分人：沒有找到講話的段落，卡片的字不分人")
+                return nil
+            }
+            let wall = Date().timeIntervalSince(started)
+            log(String(format: "分人（討論會）：講者時間算好 %d 段，%.0f 秒（背景 %.0f 秒）；等卡片補送完再標", turns.count, wall,
+                       backgroundSeconds - backgroundBefore))
+            return turns
+        } catch is CancellationError {
+            log("分人中途停止，卡片的字不分人")
+            return nil
+        } catch {
+            log("分人失敗，卡片的字不分人：\(error.localizedDescription)")
+            return nil
+        }
+    }
+
     /// 有字就存；一個字都沒出來就回到上一次的結果，不要把舊稿蓋掉。
     private func keepWhatWeHave() {
         if let run, !run.text.isEmpty {
@@ -1497,21 +1587,35 @@ final class AppModel {
     private func startReviewer(course chosen: String?) {
         reviewer = nil
         reviewNeedsCourse = false
-        let formal = chosen ?? run?.course.map(CourseSchedule.formalName)
+        // v0.27.0：聊天永遠不送（就算這個時段對到課、那門課開著）
+        guard sessionScene.usesHaiku else {
+            sessionSlides = nil
+            reviewOffReason = "聊天不送 Haiku"
+            return
+        }
+        let named = chosen ?? run?.course.map(CourseSchedule.formalName)
+        let formal = (named ?? "").isEmpty ? nil : named
         let deck = formal.flatMap { SlideImport.latest(course: $0) }
         sessionSlides = deck?.name
-        guard let formal, !formal.isEmpty else {
-            reviewOffReason = "沒有課名，點這行指定"
-            reviewNeedsCourse = true
-            return
+        // v0.27.0 討論會：沒有課名也送（中性的課程區塊、沒有投影片）；有課名照課名的規則（私人課程照樣不送）
+        var neutral: String?
+        if formal == nil {
+            guard sessionScene.allowsNoCourse else {
+                reviewOffReason = "沒有課名，點這行指定"
+                reviewNeedsCourse = true
+                return
+            }
+            neutral = RecordScene.neutralCourseBlock
         }
-        guard CourseProfile.allowsUpload(course: formal) else {
-            reviewOffReason = CourseSchedule.isPrivate(formal) ? "私人課程不送" : "不在設定檔的課不送"
-            return
-        }
-        guard CourseProfile.load(course: formal, root: Store.documents).haiku else {
-            reviewOffReason = "這門課的開關關著"
-            return
+        if let formal {
+            guard CourseProfile.allowsUpload(course: formal) else {
+                reviewOffReason = CourseSchedule.isPrivate(formal) ? "私人課程不送" : "不在設定檔的課不送"
+                return
+            }
+            guard CourseProfile.load(course: formal, root: Store.documents).haiku else {
+                reviewOffReason = "這門課的開關關著"
+                return
+            }
         }
         guard let key = HaikuKey.read() else {
             reviewOffReason = "沒有金鑰"
@@ -1519,11 +1623,12 @@ final class AppModel {
         }
         guard let current = run else { return }
         let review = LiveReviewer(
-            course: formal,
+            course: formal ?? "",
             deck: deck,
             key: key,
             base: reviewBase,
             file: Store.reviewFile(of: current),
+            courseBlock: neutral,
             clock: { [weak self] in self?.recordingSeconds ?? 0 },
             onEvent: { [weak self] line in self?.log(line) }
         )
@@ -1537,12 +1642,12 @@ final class AppModel {
                 return self.applePieces.filter { $0.end > start - shift - 1 && $0.start < end - shift + 1 }.map(\.text).joined()
             }
         } else {
-            review.configure(bigBatch: liveMode != 0)
+            review.configure(bigBatch: sessionScene.liveMode != 0)
         }
         review.start()
         reviewer = review
         // 投影片檔名可能有人名，紀錄只寫頁數
-        log("Haiku 錄音中改字：開（\(formal)，\(deck.map { "投影片 \($0.pages.count) 頁" } ?? "沒有投影片")，金鑰 \(HaikuKey.masked(key))）")
+        log("Haiku 錄音中改字：開（\(formal ?? "討論會，沒有課名")，\(deck.map { "投影片 \($0.pages.count) 頁" } ?? "沒有投影片")，金鑰 \(HaikuKey.masked(key))）")
     }
 
     /// 「這場是哪門課」（正式課名；nil＝照課表）。錄音前：下一場用（標題、資料夾、Haiku 都照它）；
@@ -1601,7 +1706,7 @@ final class AppModel {
     /// v0.26.0 模式 1：逐字稿換成各卡的擴寫接起來（原字照舊在「… 原文.txt」＝raw.txt），回傳換過的那場（自動上傳用）。
     @discardableResult
     private func finishReview(_ review: LiveReviewer, unsent: Int, finalRun: SavedRun?, finalPieces: [TimedPiece], finalDone: Bool,
-                              head: String = "") async -> SavedRun? {
+                              head: String = "", turns: [SpeakerTurn]? = nil, part: Int? = nil) async -> SavedRun? {
         if finalDone, !finalPieces.isEmpty {
             await review.annotateFinal(text: TextCleanup.fix(finalPieces.map(\.text).joined()), pieces: finalPieces)
         }
@@ -1613,18 +1718,52 @@ final class AppModel {
         var swapped: SavedRun?
         if review.cardMode, let finalRun {
             let cards = review.cards
-            let body = review.cardTranscript()
+            var body = review.cardTranscript()
+            // v0.27.0 討論會：卡片的每行照時間標講者（A：…）；沒標到就用沒分人的
+            var names: [String] = []
+            var speakerLine: String?
+            if let turns, !turns.isEmpty, !body.isEmpty {
+                let labeled = CardSpeakers.label(review.speakerLines(), turns: turns)
+                if labeled.names.isEmpty {
+                    speakerLine = "分人：卡片的字對不到講者，這\(part == nil ? "份" : "段")沒分人"
+                } else {
+                    body = labeled.text
+                    names = labeled.names
+                    speakerLine = "分人（討論會）：卡片的字標了 \(names.count) 人"
+                }
+            }
             let newText = head + body
             if !body.isEmpty {
                 if run?.startedStamp == finalRun.startedStamp {
                     run?.text = newText
+                    if !names.isEmpty {
+                        let merged = PartJoin.merge(run?.speakers, names)
+                        run?.speakers = merged
+                    }
+                    if let speakerLine {
+                        let info = PartJoin.note(run?.speakerInfo, part: part, speakerLine)
+                        run?.speakerInfo = info
+                    }
                     swapped = run
                 } else {
                     // 已經開始下一場：只改存檔，不動畫面
                     var other = finalRun
                     other.text = newText
+                    if !names.isEmpty {
+                        other.speakers = PartJoin.merge(other.speakers, names)
+                    }
+                    if let speakerLine {
+                        other.speakerInfo = PartJoin.note(other.speakerInfo, part: part, speakerLine)
+                    }
                     swapped = other
                 }
+            }
+            if !names.isEmpty, let turns {
+                let earlier = part == nil ? [] : Store.loadTurns(of: finalRun)
+                await Task.detached { Store.saveTurns(finalRun, turns: earlier + turns) }.value
+            }
+            if let speakerLine {
+                log(speakerLine, toRun: run?.startedStamp == finalRun.startedStamp)
             }
             let target = swapped
             await Task.detached {
@@ -2014,7 +2153,7 @@ final class AppModel {
             "iOS：\(UIDevice.current.systemVersion)",
             "語音引擎：\(warmNote)",
             appleAIStatus,
-            "情境：\(speakerModeLabel)；校正：\(fixName)",
+            "場景：\(scene.title)；人數：\(speakerModeLabel)；校正：\(fixName)",
             // v0.23.1：只寫有沒有金鑰（末 4 碼），不寫金鑰本身
             "Haiku：金鑰\(haikuKeyLabel.map { "已設定（\($0)）" } ?? "未設定")",
             // v0.23.2：這場的 Haiku 摘要（批數、通過、擋下、費用、最後錯誤；不含稿的字、不含金鑰）

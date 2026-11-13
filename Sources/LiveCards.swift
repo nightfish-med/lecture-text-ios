@@ -29,10 +29,17 @@ struct LiveCard: Codable, Equatable, Identifiable {
     var costUSD = 0.0
     /// 沒整理到、或擴寫沒採用的原因（不含稿的字）
     var note: String? = nil
+    /// v0.27.0：使用者點一下改的行、Pencil 重查改的行（依序套用）。舊的卡片.json 沒有這欄，所以是 Optional
+    var edits: [CardEdit]? = nil
+    /// v0.27.0：Pencil 圈起來重查（Haiku＋網路搜尋）的結果
+    var rechecks: [CardRecheck]? = nil
 
-    /// 逐字稿用的字：整理到就用擴寫，否則原稿
+    /// 逐字稿用的字：整理到就用擴寫，否則原稿；v0.27.0 再套上改過的行（一句一行套完接回去）
     var transcriptText: String {
-        state == .done && !expanded.isEmpty ? expanded : raw
+        let base = state == .done && !expanded.isEmpty ? expanded : raw
+        guard let edits, !edits.isEmpty else { return base }
+        let lines = CardDiff.lines(base).components(separatedBy: "\n")
+        return CardEdits.apply(lines: lines, edits: edits).lines.joined()
     }
 }
 
@@ -120,13 +127,14 @@ enum CardPrompt {
     static let minKeepRatio = 0.6
 
     /// 使用者訊息：前文（上一段的原稿）＋這段原稿（Whisper）＋ Apple 同一段（有才附）。不帶 [s編號]，免得編號混進擴寫。
-    static func userMessage(context: String, raw: String, reference: String, referenceName: String) -> String {
+    /// v0.27.0：userEdits＝這場使用者改過的（CardEdits.promptBlock，接在使用者訊息最後；不放進有快取的課程區塊）
+    static func userMessage(context: String, raw: String, reference: String, referenceName: String, userEdits: String = "") -> String {
         let ctx = context.isEmpty ? "（無）" : context
         var text = "前文（只參考，不要整理、不要寫進 expanded）：\n\(ctx)\n\n這段原稿（Whisper，要整理的就是這段）：\n\(raw)"
         if !reference.isEmpty {
             text += "\n\n\(referenceName) 同一段（另一個辨識器，只當證據）：\n\(reference)"
         }
-        return text
+        return text + userEdits
     }
 
     static func requestBody(courseBlock: String, userMessage: String) throws -> Data {
@@ -358,7 +366,7 @@ enum CardText {
         let head = ((card.page.map { "[p.\($0)] " } ?? "") + card.key).trimmingCharacters(in: .whitespaces)
         if !head.isEmpty { parts.append(head) }
         if !card.tidy.isEmpty { parts.append(card.tidy) }
-        let body = card.state == .done && !card.expanded.isEmpty ? card.expanded : card.raw
+        let body = card.transcriptText
         if !body.isEmpty { parts.append("原稿：\n" + CardDiff.lines(body)) }
         if !card.unsure.isEmpty { parts.append("不確定：" + card.unsure.joined(separator: "、")) }
         return parts.joined(separator: "\n\n")

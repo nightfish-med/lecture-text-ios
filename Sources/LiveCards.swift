@@ -347,6 +347,18 @@ enum CardText {
         }.joined(separator: "\n\n")
     }
 
+    /// v0.26.1 分享到別的 App（例如分割畫面旁邊的 Gemini）：「[p.N] 重點」、整理版、原稿（擴寫，一句一行）、不確定的詞
+    static func share(_ card: LiveCard) -> String {
+        var parts: [String] = []
+        let head = ((card.page.map { "[p.\($0)] " } ?? "") + card.key).trimmingCharacters(in: .whitespaces)
+        if !head.isEmpty { parts.append(head) }
+        if !card.tidy.isEmpty { parts.append(card.tidy) }
+        let body = card.state == .done && !card.expanded.isEmpty ? card.expanded : card.raw
+        if !body.isEmpty { parts.append("原稿：\n" + CardDiff.lines(body)) }
+        if !card.unsure.isEmpty { parts.append("不確定：" + card.unsure.joined(separator: "、")) }
+        return parts.joined(separator: "\n\n")
+    }
+
     /// 匯出的整理版：每張卡一段（時間、頁碼、重點、整理版、不確定的詞）；沒整理到的寫一行
     static func tidyFile(_ cards: [LiveCard]) -> String {
         cards.map { card -> String in

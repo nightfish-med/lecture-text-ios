@@ -75,6 +75,10 @@ struct HaikuMenu: View {
                 } label: {
                     Label("即時模式：\(AppModel.liveModeNames[min(max(model.liveMode, 0), 2)])", systemImage: "dial.medium")
                 }
+                // v0.26.1：和別的 App 共用麥克風（例如另一個錄音 App 同時錄；iOS 沒保證兩邊都收得到）。下次錄音生效
+                Toggle(isOn: Binding(get: { model.micShared }, set: { model.micShared = $0 })) {
+                    Label("麥克風和別的 App 共用", systemImage: "mic.badge.plus")
+                }
                 // v0.25：不用錄音也能完整測一次（選錄好的檔，4 倍速；先在上面指定課名 Haiku 才會送）
                 Button {
                     model.simulateNext = true
@@ -263,6 +267,8 @@ struct CoursePicker: View {
 /// 沒課名而沒送時，點這行選這場是哪門課。下面一條橫幅（不擋操作）：沒有網路、金鑰無效、花費到上限、Haiku 暫停；網路回來自動消失。
 struct ReviewStatusBar: View {
     let model: AppModel
+    /// v0.26.1：iPad 視窗很矮時狀態列只一行
+    @Environment(\.shortWindow) private var short
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -283,7 +289,7 @@ struct ReviewStatusBar: View {
                 Text(model.reviewStatusLine)
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(2)
+                    .lineLimit(short ? 1 : 2)
             }
             if let banner = model.reviewer?.banner {
                 Label(banner, systemImage: "exclamationmark.triangle")

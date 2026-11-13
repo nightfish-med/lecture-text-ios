@@ -78,3 +78,37 @@ struct RecordWatch {
         return h > 0 ? String(format: "%d:%02d:%02d", h, m, s) : String(format: "%d:%02d", m, s)
     }
 }
+
+/// v0.26.1：打斷結束後第一次接不回來（多半是 Siri 剛叫出來又關掉、麥克風還沒放手），0.5、1、2、4 秒各再試一次，成功就停；
+/// 4 次都失敗才交回 10 秒看門狗（以前第一次失敗就乾等看門狗，每次少約 11 秒）。這裡只算排程，接麥克風在 Recorder.swift。
+enum RecoverRetry {
+    static let delays: [Double] = [0.5, 1, 2, 4]
+
+    /// 已經快速重試了 done 次（都失敗）之後，下一次要等幾秒；nil＝不再快速重試
+    static func delay(afterRetries done: Int) -> Double? {
+        done >= 0 && done < delays.count ? delays[done] : nil
+    }
+
+    /// 測試用：outcomes[i]＝第 i 次快速重試成不成（打斷結束當下那一次不算）。回傳試了幾次、最後有沒有接回、一共等了幾秒。
+    static func simulate(_ outcomes: [Bool]) -> (tries: Int, recovered: Bool, waited: Double) {
+        var tries = 0
+        var waited = 0.0
+        while let wait = delay(afterRetries: tries) {
+            waited += wait
+            let ok = tries < outcomes.count ? outcomes[tries] : false
+            tries += 1
+            if ok { return (tries, true, waited) }
+        }
+        return (tries, false, waited)
+    }
+}
+
+/// v0.26.1「麥克風和別的 App 共用」：開＝.playAndRecord＋mixWithOthers（別的 App 播聲音、錄音不會打斷我們；別的 App 的聲音可能一起錄進去），
+/// 關＝.record（原本，獨佔）。只在按下錄音時套用。
+enum MicShare {
+    static let key = "micShared"
+
+    static func line(_ shared: Bool) -> String {
+        shared ? "麥克風：和別的 App 共用（playAndRecord＋mixWithOthers）" : "麥克風：獨佔（record）"
+    }
+}

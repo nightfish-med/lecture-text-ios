@@ -2,10 +2,39 @@ import SwiftUI
 import UIKit
 import UniformTypeIdentifiers
 
+/// v0.26.1：iPad 視窗很矮（高 < 400 點）時用精簡排版（收起標題列、按鈕縮小）。iPhone 一律 false。
+private struct ShortWindowKey: EnvironmentKey {
+    static let defaultValue = false
+}
+
+extension EnvironmentValues {
+    var shortWindow: Bool {
+        get { self[ShortWindowKey.self] }
+        set { self[ShortWindowKey.self] = newValue }
+    }
+}
+
+/// v0.26.1：iPad 視窗可以拉得更矮（寬度照系統原本的最小值；高度系統會再夾）
+enum WindowSizing {
+    static let minimumHeight: CGFloat = 220
+    static let shortBelow: CGFloat = 400
+
+    @MainActor
+    static func allowShortWindows() {
+        guard UIDevice.current.userInterfaceIdiom == .pad else { return }
+        for case let scene as UIWindowScene in UIApplication.shared.connectedScenes {
+            guard let limits = scene.sizeRestrictions else { continue }
+            limits.minimumSize = CGSize(width: limits.minimumSize.width, height: minimumHeight)
+        }
+    }
+}
+
 struct ContentView: View {
     @Bindable var model: AppModel
     /// v0.15 連電腦：關掉畫面就停，跟原本的錄音、選檔分開（不共用麥克風）。
     @State private var link = PhoneLink()
+    /// v0.26.1：視窗高度 < 400 點（只在 iPad 用）
+    @State private var short = false
 
     var body: some View {
         ZStack {
@@ -16,6 +45,16 @@ struct ContentView: View {
             .padding(.horizontal, 20)
         }
         .foregroundStyle(.black)
+        // v0.26.1：iPad 視窗很矮時精簡排版；視窗可以拉得更矮
+        .onGeometryChange(for: Bool.self) { proxy in
+            proxy.size.height < WindowSizing.shortBelow
+        } action: { value in
+            short = value
+        }
+        .environment(\.shortWindow, short && UIDevice.current.userInterfaceIdiom == .pad)
+        .onAppear {
+            WindowSizing.allowShortWindows()
+        }
         // v0.23.1：第一次貼金鑰的說明、投影片選課、上方提示（ReviewViews.swift）
         .modifier(HaikuSheets(model: model))
         // 「選檔案」選到 PDF 也走 importFile，裡面依副檔名分到投影片匯入
@@ -146,19 +185,23 @@ private struct StartView: View {
 
 private struct RecordingView: View {
     let model: AppModel
+    /// v0.26.1：iPad 視窗很矮
+    @Environment(\.shortWindow) private var short
 
     var body: some View {
-        // v0.14：錄音中也看得到這場叫什麼（照課表是「11/10 幾何」）
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(model.run?.displayTitle ?? "")
-                .font(.headline)
-                .lineLimit(1)
-            Text("錄音中")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+        // v0.14：錄音中也看得到這場叫什麼（照課表是「11/10 幾何」）；v0.26.1 視窗很矮時收起
+        if !short {
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(model.run?.displayTitle ?? "")
+                    .font(.headline)
+                    .lineLimit(1)
+                Text("錄音中")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer(minLength: 0)
+            }
+            .padding(.top, 8)
         }
-        .padding(.top, 8)
         // v0.23.2：投影片＋Haiku 狀態一行、橫幅（沒網路、金鑰無效、花費上限、Haiku 暫停；不擋操作）
         ReviewStatusBar(model: model)
         if let review = model.reviewer, review.cardMode {
@@ -171,7 +214,7 @@ private struct RecordingView: View {
                      rules: model.liveFixRules, turnOff: { model.turnOffLiveFix($0) })
                 .padding(.top, 4)
         }
-        if let part = model.continuing?.part {
+        if let part = model.continuing?.part, !short {
             Text("續錄第 \(part) 段，接在原稿後面；時間從整場開頭算")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -188,7 +231,7 @@ private struct RecordingView: View {
             VStack(alignment: .leading, spacing: 2) {
                 TimelineView(.periodic(from: .now, by: 1)) { _ in
                     Text(formatClock(model.recordingSeconds))
-                        .font(.system(size: 28, weight: .light, design: .rounded))
+                        .font(.system(size: short ? 18 : 28, weight: .light, design: .rounded))
                         .monospacedDigit()
                 }
                 // v0.21：按了複製之後 2 秒「已複製到 mm:ss」
@@ -204,7 +247,7 @@ private struct RecordingView: View {
             RoundIcon(
                 systemName: (model.liveCopyNote ?? "").hasPrefix("已複製") ? "checkmark" : "doc.on.doc",
                 label: "複製到目前為止的全文",
-                size: 56
+                size: short ? 34 : 56
             ) {
                 model.copyWhileRecording()
             }
@@ -214,12 +257,12 @@ private struct RecordingView: View {
                 model.recordButtonTapped()
             } label: {
                 Image(systemName: "stop.circle.fill")
-                    .font(.system(size: 64))
+                    .font(.system(size: short ? 36 : 64))
                     .foregroundStyle(.red)
             }
             .accessibilityLabel("停止錄音")
         }
-        .padding(.vertical, 8)
+        .padding(.vertical, short ? 2 : 8)
     }
 }
 
@@ -393,6 +436,15 @@ private struct ResultView: View {
     @AppStorage("sideColumnOpen") private var sideOpen = true
     @State private var renaming = false
     @State private var draftTitle = ""
+    /// v0.26.1：模式 1 的場的卡片清單（可分享、拖到別的 App）
+    @State private var showCards = false
+    /// v0.26.1：iPad 視窗很矮
+    @Environment(\.shortWindow) private var short
+
+    /// 這場有卡片（即時模式 1 錄的）
+    private var hasCards: Bool {
+        FileManager.default.fileExists(atPath: Store.cardsFile(of: run).path)
+    }
 
     /// 【我推論】右欄要稿至少留 520 點才放得下，所以 860 點以上才分兩欄（11 吋 iPad 橫放 1180、直放 820）
     static let wideWidth: CGFloat = 860
@@ -412,6 +464,11 @@ private struct ResultView: View {
                 }
             }
         }
+        .sheet(isPresented: $showCards) {
+            ResultCardsSheet(run: run) {
+                showCards = false
+            }
+        }
         .alert("改標題", isPresented: $renaming) {
             TextField("標題", text: $draftTitle)
             Button("好") {
@@ -425,7 +482,9 @@ private struct ResultView: View {
 
     @ViewBuilder
     private func mainColumn(width: CGFloat, wide: Bool) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: short ? 4 : 10) {
+            // v0.26.1：視窗很矮時收起標題列、狀態字（收起這一場的 ✕ 搬到下面那排）
+            if !short {
             HStack(alignment: .top, spacing: 8) {
                 VStack(alignment: .leading, spacing: 2) {
                     // 未命名的錄音用時間當標題；照課表是「11/10 幾何」。點了可改
@@ -477,10 +536,13 @@ private struct ResultView: View {
             }
             .font(.caption)
             .foregroundStyle(.secondary)
+            }
             if case .failed(let message) = model.phase {
                 FailureLine(message: message)
             }
-            Divider()
+            if !short {
+                Divider()
+            }
             // 點一下＝從那句播、點兩下＝標記、按住＝選字（可拖到別的 App）、Pencil 畫過＝標記
             TranscriptPane(model: model, text: run.text)
             if !(wide && sideOpen) {
@@ -494,8 +556,14 @@ private struct ResultView: View {
     /// 窄的時候圓鈕跟著縮（iPad 分割畫面最窄約 320 點），不擠出畫面。
     private func bottomBar(width: CGFloat) -> some View {
         let gap: CGFloat = width < 340 ? 4 : 8
-        let size = max(32, min(46, (width - 64 - gap * 5) / 5))
+        let count: CGFloat = 5 + (hasCards ? 1 : 0) + (short ? 1 : 0)
+        let size = short ? 30 : max(32, min(46, (width - 64 - gap * count) / count))
         return HStack(spacing: gap) {
+            if short {
+                SmallCircleButton(systemName: "xmark", label: "收起這一場", hint: "回開始畫面，檔案不刪") {
+                    model.closeRun()
+                }
+            }
             // 結果畫面左下角的麥克風＝接著這一場錄。錄新的一場要先按 ✕ 回開始畫面
             RoundIcon(systemName: "mic.fill", label: "繼續錄", size: size, badge: .symbol("plus")) {
                 model.continueRecording()
@@ -510,10 +578,16 @@ private struct ResultView: View {
             }
             SpeakerMenu(model: model, size: size)
             FixMenu(model: model, size: size)
+            // v0.26.1：模式 1 的場：看卡片、分享到別的 App
+            if hasCards {
+                RoundIcon(systemName: "rectangle.stack", label: "看卡片（可分享到別的 App）", size: size) {
+                    showCards = true
+                }
+            }
             Spacer(minLength: 0)
             CopyButton(model: model)
         }
-        .padding(.bottom, 8)
+        .padding(.bottom, short ? 2 : 8)
     }
 }
 

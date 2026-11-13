@@ -128,6 +128,12 @@ func cardsTests(_ check: @escaping (String, String, String) -> Void) {
     check(CardText.copy([a, b, c]), "[p.3] 導數定義\n老師先複習導數的定義。\n\n例題\n做一題例題。", "卡片複製：[頁碼] 重點＋整理版，沒整理到的不放")
     check(CardText.tidyFile([a, b, c]), "00:00–01:01　p.3\n重點：導數定義\n老師先複習導數的定義。\n不確定：到數→導數\n\n01:01–02:05\n（沒整理到）\n\n02:05–1:01:40\n重點：例題\n做一題例題。\n", "整理版：時間、頁碼、重點、整理版、不確定")
     check(CardText.transcript([c, a, b], tail: "還沒進卡"), "擴寫一。\n\n原稿二\n\n擴寫三。\n\n還沒進卡", "逐字稿：依時間接擴寫，沒整理到用原稿，沒進卡的接最後")
+    // v0.26.1 分享到別的 App 的文字
+    check(CardText.share(a), "[p.3] 導數定義\n\n老師先複習導數的定義。\n\n原稿：\n擴寫一。\n\n不確定：到數→導數", "卡片分享：[頁碼] 重點、整理版、原稿、不確定的詞")
+    check(CardText.share(b), "原稿：\n原稿二", "卡片分享：沒整理到的卡只有原稿")
+    var d = c
+    d.expanded = "第一句。第二句？"
+    check(CardText.share(d), "例題\n\n做一題例題。\n\n原稿：\n第一句。\n第二句？", "卡片分享：沒頁碼不寫 [p.N]、原稿一句一行")
     check(CardText.latestPage([a, b, c]).map { "\($0)" } ?? "nil", "3", "狀態列頁碼：最新一張有頁碼的卡")
     check(CardText.latestPage([b]).map { "\($0)" } ?? "nil", "nil", "狀態列頁碼：都沒有頁碼")
     let saved = try? JSONEncoder().encode([a, b])

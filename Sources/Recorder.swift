@@ -45,6 +45,10 @@ final class AudioPump: @unchecked Sendable {
     private var writeError: String?
     /// v0.24：即時模式 2（錄音中跑 Whisper）時，存檔那份聲音也抄一份給它；nil＝不抄
     var tap: SampleTap?
+    /// v0.26.1：和別的 App 共用麥克風（系統聲音服務重開時照這個重設類別）
+    private let shareMic: Bool
+    /// v0.26.1：快速重試的代號；又被打斷、停止時加一，排好的重試就不跑
+    private var quickToken = 0
 
     var seconds: Double {
         lock.lock()
@@ -56,6 +60,7 @@ final class AudioPump: @unchecked Sendable {
         saveTo url: URL,
         analyzerFormat: AVAudioFormat,
         input: AsyncStream<AnalyzerInput>.Continuation,
+        shareMic: Bool = false,
         onEvent: @escaping (String) -> Void
     ) throws {
         guard let format = AVAudioFormat(
@@ -69,6 +74,7 @@ final class AudioPump: @unchecked Sendable {
         self.fileFormat = format
         self.analyzerFormat = analyzerFormat
         self.input = input
+        self.shareMic = shareMic
         self.onEvent = onEvent
         self.file = try AVAudioFile(
             forWriting: url,
@@ -97,12 +103,19 @@ final class AudioPump: @unchecked Sendable {
                 return
             }
             if kind == .began {
+                self.quickToken += 1
                 self.onEvent("錄音被打斷：\(Self.interruptionReason(note.userInfo))")
                 return
             }
             let optionsRaw = note.userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt ?? 0
             let mayResume = AVAudioSession.InterruptionOptions(rawValue: optionsRaw).contains(.shouldResume)
-            self.onEvent("打斷結束（系統\(mayResume ? "說可以接著錄" : "沒說可以接著錄，照樣試")）；\(self.recover())")
+            let first = self.attemptRecover()
+            self.onEvent("打斷結束（系統\(mayResume ? "說可以接著錄" : "沒說可以接著錄，照樣試")）；\(first.line)")
+            // v0.26.1：第一次接不回來就 0.5、1、2、4 秒各再試一次（不用乾等 10 秒看門狗）
+            if !first.ok {
+                self.quickToken += 1
+                self.quickRetry(done: 0, token: self.quickToken)
+            }
         })
         // 插拔耳機、連上或斷開藍牙：記是哪一種、現在用哪個麥克風（只記種類，不記裝置名稱：名稱常有人名）。
         observers.append(center.addObserver(
@@ -133,7 +146,7 @@ final class AudioPump: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            try? AVAudioSession.sharedInstance().setCategory(.record, mode: .default)
+            try? Self.setCategory(shared: self.shareMic)
             self.onEvent("系統聲音服務重開了；\(self.recover())")
         })
     }
@@ -178,25 +191,62 @@ final class AudioPump: @unchecked Sendable {
     }
 
     func recover() -> String {
+        attemptRecover().line
+    }
+
+    /// v0.26.1：回傳接回來沒有＋一句結果；接不回來寫 NSError 的 domain 和 code（下次才知道是哪一種）
+    private func attemptRecover() -> (ok: Bool, line: String) {
         if simulating {
-            return "模擬上課中，不用接麥克風"
+            return (true, "模擬上課中，不用接麥克風")
         }
         if engine.isRunning {
-            return "麥克風還在收"
+            return (true, "麥克風還在收")
         }
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            return "接不回來（聲音被別的 App 或系統佔著）：\(error.localizedDescription)"
+            return (false, "接不回來（聲音被別的 App 或系統佔著）：\(error.localizedDescription)\(Self.code(error))")
         }
         engine.inputNode.removeTap(onBus: 0)
         do {
             try installTap()
             engine.prepare()
             try engine.start()
-            return "已接回麥克風（\(Self.currentInput())）"
+            return (true, "已接回麥克風（\(Self.currentInput())）")
         } catch {
-            return "接不回來：\(error.localizedDescription)"
+            return (false, "接不回來：\(error.localizedDescription)\(Self.code(error))")
+        }
+    }
+
+    private static func code(_ error: Error) -> String {
+        let ns = error as NSError
+        return "（\(ns.domain) \(ns.code)）"
+    }
+
+    /// v0.26.1 快速重試（主執行緒）：照 RecoverRetry 的間隔再試，成功就停；都失敗交回看門狗。中途又被打斷或停止（代號變了）就不跑。
+    private func quickRetry(done: Int, token: Int) {
+        guard let wait = RecoverRetry.delay(afterRetries: done) else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + wait) { [weak self] in
+            guard let self, self.quickToken == token else { return }
+            let result = self.attemptRecover()
+            let label = String(format: "打斷結束後快速重試第 %d 次（等 %.1f 秒）", done + 1, wait)
+            if result.ok {
+                self.onEvent("\(label)：\(result.line)")
+            } else if RecoverRetry.delay(afterRetries: done + 1) == nil {
+                self.onEvent("\(label)：\(result.line)；快速重試用完，交給看門狗")
+            } else {
+                self.quickRetry(done: done + 1, token: token)
+            }
+        }
+    }
+
+    /// v0.26.1：錄音的聲音類別。shared＝和別的 App 共用（不會被別的 App 播聲音打斷，別的 App 的聲音可能一起錄進去）
+    static func setCategory(shared: Bool) throws {
+        let session = AVAudioSession.sharedInstance()
+        if shared {
+            try session.setCategory(.playAndRecord, mode: .default, options: [.mixWithOthers, .defaultToSpeaker, .allowBluetoothA2DP])
+        } else {
+            try session.setCategory(.record, mode: .default)
         }
     }
 
@@ -317,6 +367,7 @@ final class AudioPump: @unchecked Sendable {
 
     /// 收麥克風、關檔、告訴語音引擎聲音結束了。
     func stop() {
+        quickToken += 1
         for observer in observers {
             NotificationCenter.default.removeObserver(observer)
         }
@@ -409,6 +460,7 @@ final class LiveSession {
         onError: @escaping @MainActor (String) -> Void,
         onEvent: @escaping @MainActor (String) -> Void,
         tap: SampleTap? = nil,
+        shareMic: Bool = false,
         simulate: URL? = nil,
         speed: Double = 4,
         onSimEnd: (@MainActor () -> Void)? = nil
@@ -422,7 +474,8 @@ final class LiveSession {
         }
 
         let session = AVAudioSession.sharedInstance()
-        try session.setCategory(.record, mode: .default)
+        // v0.26.1：「麥克風和別的 App 共用」開著就用 playAndRecord＋mixWithOthers
+        try AudioPump.setCategory(shared: shareMic)
         try session.setActive(true)
 
         let analyzer = warm?.analyzer ?? makeAnalyzer(transcriber)
@@ -435,7 +488,7 @@ final class LiveSession {
         }
         let (stream, continuation) = AsyncStream<AnalyzerInput>.makeStream()
         // 通知都在主執行緒送（observer 的 queue 是 .main）
-        let pump = try AudioPump(saveTo: url, analyzerFormat: format, input: continuation) { line in
+        let pump = try AudioPump(saveTo: url, analyzerFormat: format, input: continuation, shareMic: shareMic) { line in
             MainActor.assumeIsolated { onEvent(line) }
         }
 

@@ -1,4 +1,6 @@
 import SwiftUI
+import UIKit
+import UniformTypeIdentifiers
 
 // v0.26.0 即時模式 1 錄音畫面：由上而下一張張卡（每 60 秒一張），下面接還沒進卡的字。
 // 每張卡：頁碼小膠囊＋時間範圍、一句重點、整理版、不確定的詞、「原稿」（預設展開；擴寫後全文一句一行，改過的字綠色，點了才看原字）。
@@ -22,7 +24,8 @@ struct LiveCardsView: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(review.cards) { card in
-                        LiveCardView(card: card, diff: review.diffs[card.id])
+                        LiveCardView(card: card, diff: review.diffs[card.id],
+                                     slides: SlideRef(course: review.course, source: review.log.slides))
                     }
                     LiveCardsTail(model: model, review: review)
                     Color.clear
@@ -79,10 +82,86 @@ private struct LiveCardsTail: View {
     }
 }
 
+/// v0.26.1：卡片分享時要畫哪份投影片（正式課名＋原 PDF 檔名；檔名 nil＝這門課最新的那份）
+struct SlideRef: Equatable {
+    let course: String
+    let source: String?
+}
+
+/// v0.26.1 卡片分享到別的 App（單向；例如 iPad 分割畫面旁邊的 Gemini）：文字＋那一頁投影片的圖。
+enum CardShare {
+    /// 投影片那一頁的圖（沒頁碼、沒投影片、沒有 PDF＝nil）。背景跑。
+    static func image(_ card: LiveCard, slides: SlideRef?) async -> UIImage? {
+        guard let page = card.page, let slides else { return nil }
+        let data = await Task.detached {
+            SlideImport.pageImage(course: slides.course, source: slides.source, page: page)
+        }.value
+        return data.flatMap { UIImage(data: $0) }
+    }
+
+    /// 開系統分享面板；iPad 用 anchor 當 popover 的錨點
+    @MainActor
+    static func present(_ card: LiveCard, slides: SlideRef?, anchor: UIView?) async {
+        var items: [Any] = [CardText.share(card)]
+        if let image = await image(card, slides: slides) {
+            items.append(image)
+        }
+        guard let anchor, let window = anchor.window, var top = window.rootViewController else { return }
+        while let next = top.presentedViewController {
+            top = next
+        }
+        let controller = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        if let popover = controller.popoverPresentationController {
+            popover.sourceView = anchor
+            popover.sourceRect = anchor.bounds
+        }
+        top.present(controller, animated: true)
+    }
+
+    /// 長按拖到旁邊的 App：文字和圖兩種都放（對方 App 挑它收得下的那種）
+    static func provider(_ card: LiveCard, slides: SlideRef?) -> NSItemProvider {
+        let provider = NSItemProvider(object: CardText.share(card) as NSString)
+        if let page = card.page, let slides {
+            provider.registerDataRepresentation(forTypeIdentifier: UTType.jpeg.identifier, visibility: .all) { completion in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let data = SlideImport.pageImage(course: slides.course, source: slides.source, page: page)
+                    completion(data, nil)
+                }
+                return nil
+            }
+        }
+        return provider
+    }
+}
+
+/// 抓到分享鈕底下的 UIView（iPad 分享面板要從這裡彈出來）
+final class ShareAnchorBox {
+    weak var view: UIView?
+}
+
+struct ShareAnchorView: UIViewRepresentable {
+    let box: ShareAnchorBox
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        box.view = view
+        return view
+    }
+
+    func updateUIView(_ view: UIView, context: Context) {
+        box.view = view
+    }
+}
+
 /// 一張卡
 struct LiveCardView: View {
     let card: LiveCard
     let diff: [CardDiff.Piece]?
+    /// v0.26.1：分享時畫哪份投影片；nil＝只送文字
+    var slides: SlideRef? = nil
+    @State private var anchor = ShareAnchorBox()
     /// 原稿預設展開；點「原稿」收合
     @State private var rawOpen = true
     /// 點開看原字的那幾組
@@ -106,6 +185,20 @@ struct LiveCardView: View {
                     .font(.caption2)
                     .monospacedDigit()
                     .foregroundStyle(.secondary)
+                // v0.26.1：分享到別的 App（文字＋那一頁投影片的圖）
+                Button {
+                    let target = anchor.view
+                    Task { await CardShare.present(card, slides: slides, anchor: target) }
+                } label: {
+                    Image(systemName: "square.and.arrow.up")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(width: 28, height: 22)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .background(ShareAnchorView(box: anchor))
+                .accessibilityLabel("分享這張卡")
             }
             switch card.state {
             case .waiting:
@@ -163,6 +256,11 @@ struct LiveCardView: View {
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(.systemGray6)))
+        .contentShape(.dragPreview, RoundedRectangle(cornerRadius: 14))
+        // v0.26.1：長按拖到旁邊的 App（文字＋圖）
+        .onDrag {
+            CardShare.provider(card, slides: slides)
+        }
     }
 
     /// 原稿區的字：整理到的卡＝擴寫全文（一句一行），改過的字綠色、純刪除的地方一個小紅點；點了在後面顯示原字（刪除線、小一號、灰）
@@ -204,5 +302,54 @@ struct LiveCardView: View {
         part.font = Font.footnote
         part.strikethroughStyle = Text.LineStyle(pattern: .solid, color: Color.gray)
         return part
+    }
+}
+
+/// v0.26.1 結果畫面的卡片清單（模式 1 的場；讀「… 卡片.json」，比對在背景算）
+struct ResultCardsSheet: View {
+    let run: SavedRun
+    let close: () -> Void
+    @State private var cards: [LiveCard] = []
+    @State private var diffs: [Int: [CardDiff.Piece]] = [:]
+    @State private var slides: SlideRef?
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 12) {
+                    ForEach(cards) { card in
+                        LiveCardView(card: card, diff: diffs[card.id], slides: slides)
+                    }
+                }
+                .padding(16)
+            }
+            .background(Color.white)
+            .navigationTitle(run.displayTitle)
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(action: close) {
+                        Image(systemName: "xmark")
+                    }
+                    .accessibilityLabel("關閉")
+                }
+            }
+        }
+        .task {
+            let current = run
+            let loaded = await Task.detached { () -> ([LiveCard], [Int: [CardDiff.Piece]], String?) in
+                let cards = Store.loadCards(of: current)
+                var diffs: [Int: [CardDiff.Piece]] = [:]
+                for card in cards where card.state == .done {
+                    diffs[card.id] = CardDiff.pieces(raw: card.raw, expanded: card.expanded)
+                }
+                return (cards, diffs, Store.loadReview(of: current)?.slides)
+            }.value
+            cards = loaded.0
+            diffs = loaded.1
+            if let course = run.course.map(CourseSchedule.formalName) {
+                slides = SlideRef(course: course, source: loaded.2)
+            }
+        }
     }
 }

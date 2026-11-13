@@ -127,6 +127,17 @@ final class AppModel {
         didSet { UserDefaults.standard.set(liveMode, forKey: "liveMode") }
     }
     static let liveModeNames = ["Apple＋Haiku（15 秒一批）", "Whisper 主稿＋Haiku 每 60 秒一張卡（重點、整理版、擴寫）", "Apple＋Haiku（60 秒一批，對照用）"]
+    /// v0.26.1「麥克風和別的 App 共用」（預設關、記住上次；下一次按錄音才生效）
+    var micShared: Bool = UserDefaults.standard.bool(forKey: MicShare.key) {
+        didSet {
+            UserDefaults.standard.set(micShared, forKey: MicShare.key)
+            if phase == .recording {
+                showBanner("麥克風共用：下次錄音生效")
+            }
+        }
+    }
+    /// 這場錄音實際用的（按下錄音時定）
+    @ObservationIgnored private var micSharedNow = false
     /// v0.25 模擬上課：下一個選來的檔當作錄音跑（4 倍速，Whisper、Haiku 都跑）
     var simulateNext = false
     @ObservationIgnored private var simSource: URL?
@@ -448,10 +459,11 @@ final class AppModel {
             do {
                 let locale = try await SpeechEngine.resolveTaiwanLocale()
                 beginRun(source: url.lastPathComponent, locale: locale)
+                micSharedNow = micShared
                 if let c = continuing {
-                    log("續錄第 \(c.part) 段，從 \(formatClock(c.offset)) 接著錄；\(liveInfo ?? "")")
+                    log("續錄第 \(c.part) 段，從 \(formatClock(c.offset)) 接著錄；\(liveInfo ?? "")；\(MicShare.line(micSharedNow))")
                 } else {
-                    log("開始錄音；\(liveInfo ?? "")")
+                    log("開始錄音；\(liveInfo ?? "")；\(MicShare.line(micSharedNow))")
                 }
                 // v0.24 即時模式 1：錄音中同時跑 Whisper（存檔那份聲音抄一份給它）
                 liveWhisper?.cancel()
@@ -516,6 +528,7 @@ final class AppModel {
                         self?.log(line)
                     },
                     tap: liveWhisper?.tap,
+                    shareMic: micSharedNow,
                     simulate: sim,
                     onSimEnd: { [weak self] in
                         guard let self, self.phase == .recording else { return }
@@ -987,6 +1000,8 @@ final class AppModel {
         let id = UUID()
         let source: String
         let pages: [String]
+        /// v0.26.1：暫存的 PDF（存進這門課時一起留，卡片分享畫那一頁用）；nil＝沒有
+        var pdf: URL? = nil
     }
 
     /// 鑰匙圈裡有金鑰時是 sk-ant-…末4碼；金鑰本身不放在畫面狀態裡。
@@ -1117,12 +1132,17 @@ final class AppModel {
         slideNote = "讀投影片中…"
         Task {
             do {
-                let pages = try await Task.detached { () throws -> [String] in
+                // v0.26.1：PDF 不再抽完就刪，存進這門課時一起留在裝置上（不上傳），卡片分享畫那一頁用
+                let (pages, copy) = try await Task.detached { () throws -> ([String], URL) in
                     let copy = try Store.copyToTemporary(url)
-                    defer { try? FileManager.default.removeItem(at: copy.deletingLastPathComponent()) }
-                    return try SlideImport.extractPages(copy)
+                    do {
+                        return (try SlideImport.extractPages(copy), copy)
+                    } catch {
+                        try? FileManager.default.removeItem(at: copy.deletingLastPathComponent())
+                        throw error
+                    }
                 }.value
-                let pending = PendingSlides(source: source, pages: pages)
+                let pending = PendingSlides(source: source, pages: pages, pdf: copy)
                 if let now = CourseSchedule.course(at: Date()), CourseProfile.allowsUpload(course: now) {
                     saveSlides(pending, course: CourseSchedule.formalName(now))
                 } else {
@@ -1144,10 +1164,11 @@ final class AppModel {
         pendingSlides = nil
         let pages = pending.pages
         let source = pending.source
+        let pdf = pending.pdf
         Task {
             do {
                 let deck = try await Task.detached {
-                    try SlideImport.save(pages: pages, source: source, course: course)
+                    try SlideImport.save(pages: pages, source: source, course: course, pdf: pdf)
                 }.value
                 slideNote = deck.summary
                 showBanner(deck.summary)
@@ -1165,6 +1186,9 @@ final class AppModel {
     /// 選了「其他」：不存。
     func skipSlides(_ pending: PendingSlides) {
         pendingSlides = nil
+        if let pdf = pending.pdf {
+            try? FileManager.default.removeItem(at: pdf.deletingLastPathComponent())
+        }
         slideNote = "投影片沒有存（選了其他）"
         showBanner("投影片沒有存（選了其他）")
     }

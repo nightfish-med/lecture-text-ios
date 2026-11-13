@@ -15,8 +15,9 @@ extension EnvironmentValues {
 }
 
 /// v0.26.1：iPad 視窗可以拉得更矮（寬度照系統原本的最小值；高度系統會再夾）
+/// v0.27.1：再降到 100 點（系統不准這麼矮就照系統的最小值）；矮的時候錄音畫面只剩字和浮著的停止鈕
 enum WindowSizing {
-    static let minimumHeight: CGFloat = 220
+    static let minimumHeight: CGFloat = 100
     static let shortBelow: CGFloat = 400
 
     @MainActor
@@ -74,6 +75,14 @@ struct ContentView: View {
             .presentationDetents([.medium, .large])
             .ignoresSafeArea()
         }
+        // v0.27.1：停止後（有卡片的場）自動跳出：逐字稿 md＋重點 PDF，存到雲端硬碟等
+        .sheet(item: $model.sessionShare) { item in
+            MultiShareSheet(urls: item.urls) {
+                model.sessionShare = nil
+            }
+            .presentationDetents([.medium, .large])
+            .ignoresSafeArea()
+        }
         .fullScreenCover(isPresented: $model.showLink) {
             LinkView(link: link, close: {
                 link.stop()
@@ -119,6 +128,8 @@ private struct StartView: View {
     let model: AppModel
     /// v0.27.0：討論會開始前的提醒（App 內的確認，不是系統警告框）
     @State private var confirmScene = false
+    /// v0.27.1：以前的課
+    @State private var showHistory = false
 
     var body: some View {
         Spacer()
@@ -149,8 +160,17 @@ private struct StartView: View {
             }
             // v0.23.1：Haiku 金鑰、這門課的投影片、要不要送（ReviewViews.swift）
             HaikuMenu(model: model, size: 56)
+            // v0.27.1：以前的課（這台裝置存的每一場，依課分組）
+            RoundIcon(systemName: "clock.arrow.circlepath", label: "以前的課", size: 56) {
+                showHistory = true
+            }
         }
         .padding(.top, 28)
+        .sheet(isPresented: $showHistory) {
+            HistorySheet(model: model) {
+                showHistory = false
+            }
+        }
         if let note = model.crashNote {
             CrashLine(model: model, note: note).font(.footnote).padding(.top, 20)
         }
@@ -202,7 +222,31 @@ private struct RecordingView: View {
     /// v0.26.1：iPad 視窗很矮
     @Environment(\.shortWindow) private var short
 
+    /// v0.27.1 浮著的停止鈕（點）
+    private var stopSize: CGFloat { short ? 30 : 44 }
+
     var body: some View {
+        // v0.27.1：拿掉錄音時間和複製鈕；停止鈕縮小、浮在右下角，字可以捲到它下面（最後一行留空間不被蓋住）
+        VStack(spacing: 0) {
+            content
+        }
+        .overlay(alignment: .bottomTrailing) {
+            Button {
+                model.recordButtonTapped()
+            } label: {
+                Image(systemName: "stop.circle.fill")
+                    .font(.system(size: stopSize))
+                    .foregroundStyle(.red)
+                    .background(Circle().fill(Color.white).padding(3))
+                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+            }
+            .accessibilityLabel("停止錄音")
+            .padding(.bottom, short ? 4 : 10)
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
         // v0.14：錄音中也看得到這場叫什麼（照課表是「11/10 幾何」）；v0.26.1 視窗很矮時收起
         if !short {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
@@ -222,11 +266,13 @@ private struct RecordingView: View {
             // v0.26.0 即時模式 1：每 60 秒一張卡（重點、整理版、擴寫原稿），下面接還沒進卡的字（LiveCardViews.swift）
             LiveCardsView(model: model, review: review)
                 .padding(.top, 4)
+                .contentMargins(.bottom, stopSize + 20, for: .scrollContent)
         } else {
             // v0.22：錄音中的字照課程對照表改（只改畫面），改過的字綠底，點了看原字
             LiveText(final: model.recordingTail, volatile: model.volatileText,
                      rules: model.liveFixRules, turnOff: { model.turnOffLiveFix($0) })
                 .padding(.top, 4)
+                .contentMargins(.bottom, stopSize + 20, for: .scrollContent)
         }
         if let part = model.continuing?.part, !short {
             Text("續錄第 \(part) 段，接在原稿後面；時間從整場開頭算")
@@ -241,42 +287,6 @@ private struct RecordingView: View {
         if let note = model.stallNote {
             FailureLine(message: note)
         }
-        HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                TimelineView(.periodic(from: .now, by: 1)) { _ in
-                    Text(formatClock(model.recordingSeconds))
-                        .font(.system(size: short ? 18 : 28, weight: .light, design: .rounded))
-                        .monospacedDigit()
-                }
-                // v0.21：按了複製之後 2 秒「已複製到 mm:ss」
-                if let note = model.liveCopyNote {
-                    Text(note)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .transition(.opacity)
-                }
-            }
-            Spacer()
-            // v0.21：錄音當下就能複製：到目前為止的全文進剪貼簿，錄音不停
-            RoundIcon(
-                systemName: (model.liveCopyNote ?? "").hasPrefix("已複製") ? "checkmark" : "doc.on.doc",
-                label: "複製到目前為止的全文",
-                size: short ? 34 : 56
-            ) {
-                model.copyWhileRecording()
-            }
-            .accessibilityHint("錄音不會停")
-            .padding(.trailing, 8)
-            Button {
-                model.recordButtonTapped()
-            } label: {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: short ? 36 : 64))
-                    .foregroundStyle(.red)
-            }
-            .accessibilityLabel("停止錄音")
-        }
-        .padding(.vertical, short ? 2 : 8)
     }
 }
 
@@ -454,6 +464,8 @@ private struct ResultView: View {
     @State private var showCards = false
     /// v0.27.0：討論會續錄前的提醒
     @State private var confirmContinue = false
+    /// v0.27.1：有卡片的場預設直接看卡片（和錄音畫面同一套左右兩欄）；可以切回逐字稿
+    @AppStorage("resultShowsCards") private var showsCards = true
     /// v0.26.1：iPad 視窗很矮
     @Environment(\.shortWindow) private var short
 
@@ -559,8 +571,20 @@ private struct ResultView: View {
             if !short {
                 Divider()
             }
-            // 點一下＝從那句播、點兩下＝標記、按住＝選字（可拖到別的 App）、Pencil 畫過＝標記
-            TranscriptPane(model: model, text: run.text)
+            if hasCards {
+                Picker("顯示", selection: $showsCards) {
+                    Text("卡片").tag(true)
+                    Text("逐字稿").tag(false)
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 240)
+            }
+            if hasCards, showsCards {
+                SavedCardsList(run: run)
+            } else {
+                // 點一下＝從那句播、點兩下＝標記、按住＝選字（可拖到別的 App）、Pencil 畫過＝標記
+                TranscriptPane(model: model, text: run.text)
+            }
             if !(wide && sideOpen) {
                 PlayerStrip(model: model)
             }
@@ -604,10 +628,10 @@ private struct ResultView: View {
             }
             SceneMenu(model: model, size: size)
             FixMenu(model: model, size: size)
-            // v0.26.1：模式 1 的場：看卡片、分享到別的 App
+            // v0.27.1：有卡片的場：再跳一次「逐字稿 md＋重點 PDF」的分享（存到雲端硬碟等）
             if hasCards {
-                RoundIcon(systemName: "rectangle.stack", label: "看卡片（可分享到別的 App）", size: size) {
-                    showCards = true
+                RoundIcon(systemName: "square.and.arrow.up.on.square", label: "分享逐字稿和重點 PDF", size: size) {
+                    model.shareSessionFiles()
                 }
             }
             Spacer(minLength: 0)
@@ -952,6 +976,22 @@ private struct CrashLine: View {
 }
 
 /// 系統分享畫面。
+/// v0.27.1：一次分享好幾個檔（逐字稿 md＋重點 PDF）
+private struct MultiShareSheet: UIViewControllerRepresentable {
+    let urls: [URL]
+    let onDone: () -> Void
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        let controller = UIActivityViewController(activityItems: urls, applicationActivities: nil)
+        controller.completionWithItemsHandler = { _, _, _, _ in
+            onDone()
+        }
+        return controller
+    }
+
+    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+}
+
 private struct ShareSheet: UIViewControllerRepresentable {
     let url: URL
     let onDone: () -> Void

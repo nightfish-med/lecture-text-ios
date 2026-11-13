@@ -1035,6 +1035,8 @@ cardsTests(check)
 recoverTests(check)
 // v0.27.0 場景、點一下改字、Pencil 圈起來重查、左右欄寬度、討論會停止後分人：tools/shape_check/scene_tests.swift
 sceneTests(check)
+// v0.27.1 停止後分享的檔名與逐字稿、卡片 PDF 分頁、以前的課清單：tools/shape_check/session_tests.swift
+sessionTests(check)
 
 print(failed == 0 ? "全部通過" : "失敗 \(failed) 項")
 exit(failed == 0 ? 0 : 1)

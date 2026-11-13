@@ -10,6 +10,12 @@ struct ShareFile: Identifiable {
     let url: URL
 }
 
+/// v0.27.1 停止後分享的檔（逐字稿 md＋重點 PDF）
+struct SessionShare: Identifiable {
+    let id = UUID()
+    let urls: [URL]
+}
+
 /// 右欄點了，稿要捲到這一句並閃一下。id 每次不同，同一句點兩次也會再跳。
 struct JumpRequest: Equatable {
     let id = UUID()
@@ -95,6 +101,8 @@ final class AppModel {
     @ObservationIgnored private var liveCopyTask: Task<Void, Never>?
     /// 有值就跳系統分享畫面。
     var share: ShareFile?
+    /// v0.27.1：有值就跳「逐字稿 md＋重點 PDF」的分享畫面
+    var sessionShare: SessionShare?
     var appleAIStatus: String { AppleAI.statusLine }
     /// 辨識中只顯示最後一小段；全文等結束才放進畫面（幾小時的課字很多）。
     var liveTail: String { String((run?.text ?? "").suffix(300)) }
@@ -699,6 +707,10 @@ final class AppModel {
                     let unsent = await flush.value
                     let swapped = await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done, head: head,
                                                      turns: turns, part: part)
+                    // v0.27.1：有卡片的場停止後自動跳出分享（逐字稿 md＋重點 PDF）；已經開始下一場就不跳
+                    if review.cardMode, let shown = swapped, run?.startedStamp == shown.startedStamp, !isBusy {
+                        await prepareSessionShare(shown)
+                    }
                     autoUpload(swapped ?? uploadRun, fallbackReport: uploadReport)
                     // v0.23.5：定稿、Haiku 補送都結束才開始下課 Whisper
                     stopFlowActive = false
@@ -1847,6 +1859,63 @@ final class AppModel {
     // MARK: 收起
 
     /// 收起這一場、回開始畫面。不刪任何檔，只是下次開 App 不再自動打開它。
+    /// v0.27.1 結果畫面的分享鈕：再跳一次逐字稿 md＋重點 PDF
+    func shareSessionFiles() {
+        guard let current = run else { return }
+        Task { await prepareSessionShare(current) }
+    }
+
+    /// 檔名照固定檔名規則（YYYYMMDD_<課名>_逐字稿.md、_重點.pdf），放暫存資料夾，產生完就跳分享畫面
+    private func prepareSessionShare(_ target: SavedRun) async {
+        let device = UIDevice.current.userInterfaceIdiom == .pad ? "iPad" : "iPhone"
+        let started = Date()
+        let made = await Task.detached { () -> (urls: [URL], problem: String?) in
+            let cards = Store.loadCards(of: target)
+            guard !cards.isEmpty else { return ([], "這場沒有卡片") }
+            let slides = Store.loadReview(of: target)?.slides
+            let stamp = SessionExport.stamp(recorded: target.recordedStamp, started: target.startedStamp)
+            let speakerText = (target.speakers ?? []).isEmpty ? nil : target.text
+            let folder = FileManager.default.temporaryDirectory.appendingPathComponent("分享", isDirectory: true)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            do {
+                try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+                let md = folder.appendingPathComponent(SessionExport.transcriptName(stamp: stamp, course: target.course))
+                let slideName = slides.map { ($0 as NSString).deletingPathExtension }
+                try SessionExport.transcriptDocument(stamp: stamp, course: target.course, device: device, slides: slideName,
+                                                     cards: cards, speakerText: speakerText).write(to: md, atomically: true, encoding: .utf8)
+                let pdf = folder.appendingPathComponent(SessionExport.cardsPDFName(stamp: stamp, course: target.course))
+                let formal = target.course.map(CourseSchedule.formalName) ?? ""
+                let title = "\(ClassRecord.day(stamp)) \(ClassRecord.courseName(target.course)) 重點"
+                try CardsPDF.write(cards: cards, title: title, course: formal, slides: slides, to: pdf)
+                return ([md, pdf], nil)
+            } catch {
+                return ([], "分享檔產生失敗：\(error.localizedDescription)")
+            }
+        }.value
+        if let problem = made.problem {
+            log(problem, toRun: false)
+            showBanner(problem)
+            return
+        }
+        log(String(format: "分享檔：逐字稿 md＋重點 PDF 產生好（%.1f 秒）", Date().timeIntervalSince(started)), toRun: false)
+        sessionShare = SessionShare(urls: made.urls)
+    }
+
+    /// v0.27.1 以前的課：用結果畫面打開那一場（有卡片就是卡片）。只看；檔案不動
+    func openPastRun(_ entry: RunEntry) {
+        guard !isBusy else { return }
+        let loaded = Store.loadRun(entry)
+        player.unload()
+        anchor = nil
+        playNote = nil
+        arrangeNote = nil
+        exportNote = nil
+        continuing = nil
+        run = loaded
+        phase = .idle
+        log("打開以前的一場（\(entry.startedStamp)）", toRun: false)
+    }
+
     func closeRun() {
         guard !isBusy else { return }
         player.unload()

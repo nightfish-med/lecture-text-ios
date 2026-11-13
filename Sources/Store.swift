@@ -76,8 +76,12 @@ enum Store {
                 try? data.write(to: times, options: .atomic)
             }
         }
-        if updateLast, let data = try? JSONEncoder().encode(run) {
-            try? data.write(to: lastRunFile, options: .atomic)
+        // v0.27.1：整場另存一份（「以前的課」打開時和存的時候一模一樣）
+        if let data = try? JSONEncoder().encode(run) {
+            try? data.write(to: file(of: run, " 場.json"), options: .atomic)
+            if updateLast {
+                try? data.write(to: lastRunFile, options: .atomic)
+            }
         }
     }
 
@@ -597,6 +601,10 @@ struct SavedRun: Codable {
             head.append("時長：\(formatStamp(audioSeconds))")
         }
         head.append("來源：\(origin ?? source)")
+        // v0.27.1：錄音時的場景（以前的課清單讀這行）
+        if let scene, let value = RecordScene(rawValue: scene) {
+            head.append("場景：\(value.title)")
+        }
         if let parts, parts.count > 1 {
             head.append("錄音：共 \(parts.count) 段（\(parts.joined(separator: "、"))），字照順序接在一起，時間.json 的秒數從第一段開頭算")
         }

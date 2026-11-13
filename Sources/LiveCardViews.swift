@@ -736,6 +736,46 @@ struct LiveCardView: View {
     }
 }
 
+/// v0.27.1 結果畫面直接排的卡片（讀「… 卡片.json」，比對在背景算）：和錄音畫面同一套左右兩欄、同一個比例。只看不改。
+struct SavedCardsList: View {
+    let run: SavedRun
+    @State private var cards: [LiveCard] = []
+    @State private var diffs: [Int: [CardDiff.Piece]] = [:]
+    @State private var slides: SlideRef?
+    @State private var width: CGFloat = 0
+    @AppStorage("cardRightRatio") private var rightRatio: Double = 0
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 22) {
+                ForEach(cards) { card in
+                    LiveCardView(card: card, diff: diffs[card.id], slides: slides,
+                                 wide: LiveCardView.isWide(width),
+                                 rightWidth: CGFloat(CardSplit.right(total: Double(width), ratio: rightRatio)))
+                }
+            }
+            .padding(.vertical, 8)
+        }
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = $0 }
+        .task(id: run.startedStamp + "|" + run.text.count.description) {
+            let current = run
+            let loaded = await Task.detached { () -> ([LiveCard], [Int: [CardDiff.Piece]], String?) in
+                let cards = Store.loadCards(of: current)
+                var diffs: [Int: [CardDiff.Piece]] = [:]
+                for card in cards where card.state == .done {
+                    diffs[card.id] = CardDiff.pieces(raw: card.raw, expanded: card.expanded)
+                }
+                return (cards, diffs, Store.loadReview(of: current)?.slides)
+            }.value
+            cards = loaded.0
+            diffs = loaded.1
+            if let course = run.course.map(CourseSchedule.formalName) {
+                slides = SlideRef(course: course, source: loaded.2)
+            }
+        }
+    }
+}
+
 /// v0.26.1 結果畫面的卡片清單（模式 1 的場；讀「… 卡片.json」，比對在背景算）
 struct ResultCardsSheet: View {
     let run: SavedRun

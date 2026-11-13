@@ -31,6 +31,11 @@ func reviewTests(_ check: @escaping (String, String, String) -> Void) {
     check(step(ReviewRetry.afterNetworkError(offline: true, attempts: 3)), "retry 5.0", "沒網路不算次數，5 秒後再看")
     check(step(ReviewRetry.afterNetworkError(offline: false, attempts: 1)), "retry 5.0", "逾時第 1 次等 5 秒")
     check(step(ReviewRetry.afterNetworkError(offline: false, attempts: 3)), "giveUp", "逾時試滿 3 次放棄")
+    // v0.26.2 卡片模式：網路錯錄音中不放棄
+    check(step(ReviewRetry.afterNetworkErrorCards(offline: true, attempts: 3)), "retry 5.0", "卡片：沒網路 5 秒後再看")
+    check(step(ReviewRetry.afterNetworkErrorCards(offline: false, attempts: 1)), "retry 5.0", "卡片：加密連線失敗第 1 次等 5 秒")
+    check(step(ReviewRetry.afterNetworkErrorCards(offline: false, attempts: 3)), "retry 30.0", "卡片：試滿 3 次不放棄，30 秒後再送")
+    check(step(ReviewRetry.afterNetworkErrorCards(offline: false, attempts: 9)), "retry 30.0", "卡片：第 9 次照樣 30 秒後再送")
     check(step(ReviewRetry.afterUnreadable(attempts: 1)), "retry 0.0", "回覆解析失敗重送一次")
     check(step(ReviewRetry.afterUnreadable(attempts: 2)), "giveUp", "回覆解析失敗第二次就放棄")
 

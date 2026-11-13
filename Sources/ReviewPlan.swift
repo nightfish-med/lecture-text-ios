@@ -96,6 +96,17 @@ enum ReviewRetry {
         return .retry(after: wait(attempts: attempts))
     }
 
+    /// v0.26.2 卡片模式（模式 1）：網路錯（含 -1200 加密連線失敗）錄音中不放棄這批。
+    /// 前 3 次照 5、15、45 秒；之後每 30 秒再試，網路好了就補上（11/13 真機：12:31 斷一下後 9 批全被放棄、網路回來也不補）。
+    /// 停止後由補送的期限收尾，還沒送到的卡才標「沒整理到」。
+    static let cardParkWait = 30.0
+
+    static func afterNetworkErrorCards(offline: Bool, attempts: Int) -> Step {
+        if offline { return .retry(after: offlineWait) }
+        guard attempts < maxAttempts else { return .retry(after: cardParkWait) }
+        return .retry(after: wait(attempts: attempts))
+    }
+
     /// 回覆解析失敗：重送一次（規格 B4）
     static func afterUnreadable(attempts: Int) -> Step {
         attempts < 2 ? .retry(after: 0) : .giveUp

@@ -440,8 +440,13 @@ final class LiveReviewer {
         case .failure(let message, let offline):
             batch.error = message
             if offline { batch.attempts -= 1 }
-            apply(ReviewRetry.afterNetworkError(offline: offline, attempts: batch.attempts), to: &batch, status: nil)
+            // v0.26.2：卡片模式網路錯錄音中不放棄，卡上寫「網路不通，等一下再送」
+            apply(ReviewRetry.afterNetworkErrorCards(offline: offline, attempts: batch.attempts), to: &batch, status: nil)
             log.batches[index] = batch
+            if batch.state == .pending, var card = cards.first(where: { $0.id == batchID }), card.state == .waiting {
+                card.note = CardText.retryNote
+                put(card)
+            }
         case .response(let data, let status, let latency, let retryAfter):
             batch.http = status
             batch.latency = latency

@@ -328,6 +328,9 @@ enum CardDiff {
 // MARK: - 給人看的字（複製、整理版、逐字稿）
 
 enum CardText {
+    /// v0.26.2：送 Haiku 網路錯、等著再送的卡上那行小字
+    static let retryNote = "網路不通，等一下再送"
+
     /// mm:ss（一小時以上 h:mm:ss），時間範圍用
     static func clock(_ seconds: Double) -> String {
         let total = max(0, Int(seconds.rounded(.down)))

@@ -33,7 +33,8 @@ func recoverTests(_ check: @escaping (String, String, String) -> Void) {
     let stampFormat = DateFormatter()
     stampFormat.locale = Locale(identifier: "en_US_POSIX")
     stampFormat.dateFormat = "yyyyMMdd-HHmmss"
-    check(stampFormat.date(from: "20260105-100105").map(RecordGap.stamp) ?? "nil", "20260105-100105", "錄音中斷：牆上時間寫成 yyyyMMdd-HHmmss")
+    let stampDate: Date? = stampFormat.date(from: "20260105-100105")
+    check(stampDate.map { RecordGap.stamp($0) } ?? "nil", "20260105-100105", "錄音中斷：牆上時間寫成 yyyyMMdd-HHmmss")
     check(GapMarks.headLine([]) ?? "nil", "nil", "錄音中斷：沒斷過不寫稿頭")
     check(GapMarks.headLine([gapB, gapA]) ?? "nil", "錄音中斷：錄音 12:34 處少了 2:05（10:01–10:03）、錄音 33:20 處少了 0:15（10:30–10:30）；這些時間沒錄到",
           "錄音中斷：稿頭一行（照位置排）")
@@ -50,8 +51,10 @@ func recoverTests(_ check: @escaping (String, String, String) -> Void) {
           "錄音中斷：放在第一個開始時間 ≥ 位置的卡前面；斷在卡中間排在那張後面；比全部晚的接最後")
     check(slots(GapMarks.order(starts: [], gaps: [gap(at: 5)])), "斷@5", "錄音中斷：還沒有卡也留得住")
     check(slots(GapMarks.order(starts: [0, 60], gaps: [])), "卡0,卡1", "錄音中斷：沒斷過照原樣")
-    check(GapMarks.insert([(start: 0, text: "甲"), (start: 60, text: "乙")], gaps: [gap(at: 30)]).joined(separator: "|"),
-          "甲|〔錄音中斷 0:20（10:00–10:00），這段沒錄到〕|乙", "錄音中斷：插進有時間的塊之間")
-    let coded = try? JSONEncoder().encode([gapA])
-    check((coded.flatMap { try? JSONDecoder().decode([RecordGap].self, from: $0) } ?? []) == [gapA] ? "一樣" : "不一樣", "一樣", "錄音中斷：存檔讀回一樣")
+    let timedBlocks: [(start: Double, text: String)] = [(start: 0, text: "甲"), (start: 60, text: "乙")]
+    let inserted: [String] = GapMarks.insert(timedBlocks, gaps: [gap(at: 30)])
+    check(inserted.joined(separator: "|"), "甲|〔錄音中斷 0:20（10:00–10:00），這段沒錄到〕|乙", "錄音中斷：插進有時間的塊之間")
+    let coded: Data? = try? JSONEncoder().encode([gapA])
+    let decoded: [RecordGap] = coded.flatMap { try? JSONDecoder().decode([RecordGap].self, from: $0) } ?? []
+    check(decoded == [gapA] ? "一樣" : "不一樣", "一樣", "錄音中斷：存檔讀回一樣")
 }

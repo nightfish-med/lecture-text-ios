@@ -67,6 +67,18 @@ final class LiveWhisper {
     @ObservationIgnored private var failures = 0
     @ObservationIgnored private var compute = 0.0
     @ObservationIgnored private var lines: [String] = []
+    /// v0.28.0：卡住、沒字各重轉幾段、換掉幾段（寫進 note，停止時進紀錄）
+    @ObservationIgnored private var loopRetries = 0
+    @ObservationIgnored private var loopFixed = 0
+    @ObservationIgnored private var emptyRetries = 0
+    @ObservationIgnored private var emptyFixed = 0
+
+    private var retryNote: String {
+        var parts: [String] = []
+        if loopRetries > 0 { parts.append("卡住重轉 \(loopRetries) 段（換掉 \(loopFixed)）") }
+        if emptyRetries > 0 { parts.append("沒字重轉 \(emptyRetries) 段（補到 \(emptyFixed)）") }
+        return parts.isEmpty ? "" : "；" + parts.joined(separator: "、")
+    }
 
     init(offset: Double, saveTo: URL?) {
         self.offset = offset
@@ -128,9 +140,20 @@ final class LiveWhisper {
             let at = offset + Double(pendingStart) / rate
             let clock = Date()
             do {
-                let raw = try await WhisperRunner.transcribe(pipe, samples: chunk, offset: at, prompt: nil)
+                // v0.28.0：卡住（同一片段一直重複）或整段沒字就切兩半重轉，重轉的比較好才換（WhisperRunner.transcribeCleaned）
+                let result = try await WhisperRunner.transcribeCleaned(pipe, samples: chunk, offset: at)
                 compute += Date().timeIntervalSince(clock)
-                let kept = WhisperClean.clean(raw).pieces
+                switch result.reason {
+                case .loop?:
+                    loopRetries += 1
+                    if result.replaced { loopFixed += 1 }
+                case .empty?:
+                    emptyRetries += 1
+                    if result.replaced { emptyFixed += 1 }
+                case nil:
+                    break
+                }
+                let kept = result.clean.pieces
                 pieces += kept
                 onPieces?(kept)
                 pending.removeFirst(cut)
@@ -139,7 +162,7 @@ final class LiveWhisper {
                 lines += kept.map { "[\(formatStamp($0.start))] " + $0.text.trimmingCharacters(in: .whitespacesAndNewlines) }
                 save()
                 let behind = max(0, offset + Double(pendingStart + pending.count) / rate - covered)
-                note = String(format: "Whisper：落後 %.0f 秒，運算÷錄音 %.2f", behind, compute / max(covered - offset, 1))
+                note = String(format: "Whisper：落後 %.0f 秒，運算÷錄音 %.2f", behind, compute / max(covered - offset, 1)) + retryNote
             } catch {
                 if Task.isCancelled { break }
                 failures += 1

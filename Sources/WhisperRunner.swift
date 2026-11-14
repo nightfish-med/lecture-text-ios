@@ -90,6 +90,33 @@ enum WhisperRunner {
         return convert(results, offset: offset)
     }
 
+    /// v0.28.0 錄音中 Whisper 主稿用：轉一段、濾鬼打牆；卡住或整段沒字（LoopRetry.reason）就切兩半重轉，重轉的比較好才換（LoopRetry.accept）。
+    /// reason＝有沒有重轉、為什麼；replaced＝換了沒有。重轉出錯（不是取消）就留原本的。
+    static func transcribeCleaned(_ pipe: WhisperKit, samples: [Float], offset: Double) async throws
+        -> (clean: WhisperClean.Result, reason: LoopRetry.Reason?, replaced: Bool) {
+        let raw = try await transcribe(pipe, samples: samples, offset: offset, prompt: nil)
+        let first = WhisperClean.clean(raw)
+        let rate = WhisperPlan.sampleRate
+        let seconds = Double(samples.count) / rate
+        guard let reason = LoopRetry.reason(first, seconds: seconds), let cut = LoopRetry.splitPoint(samples) else {
+            return (first, nil, false)
+        }
+        do {
+            let head = try await transcribe(pipe, samples: Array(samples[0..<cut]), offset: offset, prompt: nil)
+            let tail = try await transcribe(pipe, samples: Array(samples[cut...]), offset: offset + Double(cut) / rate, prompt: nil)
+            // 開始時間在這段聲音結束之後的小段底下沒有聲音（多半是補零區卡住），重轉的先拿掉再比
+            let inside = (head + tail).filter { $0.start <= offset + seconds + 0.5 }
+            let again = WhisperClean.clean(inside)
+            if LoopRetry.accept(original: first, retry: again, reason: reason, end: offset + seconds) {
+                return (again, reason, true)
+            }
+            return (first, reason, false)
+        } catch {
+            if error is CancellationError || Task.isCancelled { throw CancellationError() }
+            return (first, reason, false)
+        }
+    }
+
     /// 一個錄音檔的一段（from～to 秒）→ 這段的字和時間（時間是檔裡的秒數）
     static func transcribe(_ pipe: WhisperKit, url: URL, from start: Double, to end: Double, prompt: [Int]?) async throws -> [TimedPiece] {
         let samples = try AudioProcessor.loadAudioAsFloatArray(fromPath: url.path, startTime: start, endTime: end)

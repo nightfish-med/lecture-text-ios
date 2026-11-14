@@ -271,6 +271,79 @@ enum WhisperClean {
     }
 }
 
+// MARK: 錄音中一段卡住或沒字：切兩半重轉（v0.28.0，LiveWhisper 用；真的轉在 WhisperRunner.transcribeCleaned）
+
+/// WhisperKit 1.1.1 一段卡在同一個片段時，溫度 0→0.6 試 4 次都還卡就留最後那次；卡住會把這段的 token 上限用在重複上，
+/// 卡住之後真的講的話就沒轉到（實測：一段 15 秒只剩卡住前的幾個字）。一段整個沒字（沒有任何字的 token）時 WhisperKit 不重試。
+/// 這裡決定要不要把這段從中間最安靜處切兩半各轉一次，以及重轉的結果換不換：
+/// - 卡住（壓掉 ≥ minRemoved 字或整段迴圈）：重轉的垃圾（壓掉的字＋整段略過的字）比原本少、真的字比原本多，才換；
+/// - 沒字（真的字 0、這段夠長）：重轉的要本身乾淨（沒有壓縮、沒有整段迴圈）、真的字 ≥ minEmptyChars，才換（短的多半是沒人講話時的幻覺句）；
+/// - 兩種都要：沒有幻覺句、每小段開始時間都在這段聲音裡。不換就留原本的（標註照舊，不無聲消失）。
+enum LoopRetry {
+    enum Reason: Equatable { case loop, empty }
+
+    /// 壓掉幾個字以上算卡住（「請問一下,」×5 壓掉 20 字；「對」×8 這種結巴不算）
+    static let minRemoved = 20
+    /// 每半段至少幾秒；這段不到兩倍就不切
+    static let minHalfSeconds = 4.0
+    /// 沒字的段重轉後至少要幾個真的字才換
+    static let minEmptyChars = 12
+
+    /// 真的字：不算空白、不算〔…〕標註
+    static func realChars(_ pieces: [TimedPiece]) -> Int {
+        var count = 0
+        var inMarker = false
+        for piece in pieces {
+            for c in piece.text {
+                if c == "〔" {
+                    inMarker = true
+                } else if c == "〕" {
+                    inMarker = false
+                } else if !inMarker, !c.isWhitespace {
+                    count += 1
+                }
+            }
+        }
+        return count
+    }
+
+    /// 垃圾：壓掉的字＋整段迴圈略過的字
+    static func garbage(_ result: WhisperClean.Result) -> Int {
+        result.removed + result.events.filter { $0.kind == .loop }.map(\.chars).reduce(0, +)
+    }
+
+    /// 這段要不要重轉；seconds＝這段聲音多長
+    static func reason(_ result: WhisperClean.Result, seconds: Double) -> Reason? {
+        guard seconds >= 2 * minHalfSeconds else { return nil }
+        if result.loops > 0 || result.removed >= minRemoved { return .loop }
+        if realChars(result.pieces) == 0 { return .empty }
+        return nil
+    }
+
+    /// 切在哪個樣本：中間 40%–60% 最安靜的 0.1 秒；太短回 nil
+    static func splitPoint(_ samples: [Float], rate: Double = WhisperPlan.sampleRate) -> Int? {
+        let count = samples.count
+        guard Double(count) >= 2 * minHalfSeconds * rate else { return nil }
+        let low = count * 2 / 5
+        let high = count * 3 / 5
+        let cut = WhisperPlan.quietCut(Array(samples[0..<high]), from: low)
+        return cut > 0 && cut < count ? cut : nil
+    }
+
+    /// 重轉的換不換。end＝這段聲音結束在整場第幾秒
+    static func accept(original: WhisperClean.Result, retry: WhisperClean.Result, reason: Reason, end: Double) -> Bool {
+        guard retry.hallucinations == 0, retry.pieces.allSatisfy({ $0.start <= end + 0.5 }) else { return false }
+        let gained = realChars(retry.pieces)
+        guard gained > realChars(original.pieces) else { return false }
+        switch reason {
+        case .loop:
+            return garbage(retry) < garbage(original)
+        case .empty:
+            return retry.runs == 0 && retry.loops == 0 && gained >= minEmptyChars
+        }
+    }
+}
+
 // MARK: 稿
 
 enum WhisperText {

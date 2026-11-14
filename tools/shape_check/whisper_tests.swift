@@ -160,4 +160,53 @@ func whisperTests(_ check: @escaping (String, String, String) -> Void) {
     let md = LabReport.markdown(file: "x.caf", course: "解析幾何", audioSeconds: 2_784, keywords: [], results: lab, app: "0.23.5")
     check(md.contains("| Apple 聽寫＋關鍵字 | 疑似失敗") ? "有" : "沒有", "有", "實驗模式：報告寫疑似失敗")
     check(md.contains("| Whisper | 完成 | 261 秒（10.7 倍速）；另載入模型 12 秒") ? "有" : "沒有", "有", "實驗模式：報告的 Whisper 轉換時間不含載入、載入另列")
+
+    // ---- v0.28.0 錄音中一段卡住或沒字：切兩半重轉（LoopRetry）。結果用手做的 Result，不靠壓縮比；字是編的
+    func retryPiece(_ text: String, _ start: Double, _ end: Double) -> TimedPiece { TimedPiece(text: text, start: start, end: end) }
+    func reasonName(_ reason: LoopRetry.Reason?) -> String {
+        switch reason {
+        case .loop?: return "卡住"
+        case .empty?: return "沒字"
+        case nil: return "不用"
+        }
+    }
+    let retryStuck = WhisperClean.Result(pieces: [retryPiece("我們先算這一列，然後", 0, 3), retryPiece("就是" + m(60), 3, 3)], runs: 1, removed: 118)
+    check(reasonName(LoopRetry.reason(retryStuck, seconds: 15)), "卡住", "卡住重轉：壓掉 118 字 → 重轉")
+    let retryLoopEvent = WhisperClean.Result(pieces: [retryPiece("〔疑似鬼打牆，略過 40 字〕", 0, 5)], loops: 1,
+                                             events: [WhisperClean.Event(kind: .loop, start: 0, end: 5, chars: 40)])
+    check(reasonName(LoopRetry.reason(retryLoopEvent, seconds: 15)), "卡住", "卡住重轉：整段迴圈 → 重轉")
+    check(reasonName(LoopRetry.reason(WhisperClean.Result(pieces: [retryPiece("對" + m(8), 0, 1)], runs: 1, removed: 7), seconds: 15)), "不用",
+          "卡住重轉反例：對×8 只壓掉 7 字不重轉")
+    check(reasonName(LoopRetry.reason(WhisperClean.Result(pieces: [retryPiece("今天講到第三題", 0, 3)]), seconds: 15)), "不用", "卡住重轉反例：正常的段不重轉")
+    check(reasonName(LoopRetry.reason(WhisperClean.Result(pieces: [retryPiece("", 0, 15)]), seconds: 15)), "沒字", "沒字重轉：15 秒整段沒字 → 重轉")
+    check(reasonName(LoopRetry.reason(WhisperClean.Result(pieces: []), seconds: 6)), "不用", "沒字重轉反例：不到 8 秒（切不成兩個 4 秒）不重轉")
+    check(reasonName(LoopRetry.reason(retryStuck, seconds: 7)), "不用", "卡住重轉反例：不到 8 秒不重轉")
+    check("\(LoopRetry.realChars([retryPiece(" 好 " + m(15), 0, 1), retryPiece("〔疑似鬼打牆，略過 40 字〕", 1, 2), retryPiece("大家好", 2, 3)]))", "4",
+          "卡住重轉：真的字不算空白、不算標註")
+    check("\(LoopRetry.garbage(retryLoopEvent)) \(LoopRetry.garbage(retryStuck))", "40 118", "卡住重轉：垃圾＝壓掉的字＋整段略過的字")
+
+    // 切點：10 秒的聲音，中間 40%–60% 最安靜的 0.1 秒（樣本 80000 起）→ 切在 80800；7 秒切不成兩個 4 秒
+    var retryAudio = [Float](repeating: 0.5, count: 160_000)
+    for i in 80_000..<81_600 { retryAudio[i] = 0 }
+    check(LoopRetry.splitPoint(retryAudio).map { "\($0)" } ?? "nil", "80800", "卡住重轉：切在中間最安靜處")
+    check(LoopRetry.splitPoint([Float](repeating: 0.5, count: 112_000)).map { "\($0)" } ?? "nil", "nil", "卡住重轉：不到 8 秒不切")
+
+    // 換不換
+    let retryBetter = WhisperClean.Result(pieces: [retryPiece("我們先算這一列，然後就要換位", 0, 4), retryPiece("答案是第二個，因為分母不能是零", 7.5, 12)])
+    check(LoopRetry.accept(original: retryStuck, retry: retryBetter, reason: .loop, end: 15) ? "換" : "不換", "換", "卡住重轉：重轉的乾淨、字比較多 → 換")
+    let retryStillStuck = WhisperClean.Result(pieces: [retryPiece("我們先算這一列，然後", 0, 3), retryPiece("就是" + m(30), 3, 3),
+                                                       retryPiece("答案是第二個", 7.5, 9)], runs: 1, removed: 58)
+    check(LoopRetry.accept(original: retryStuck, retry: retryStillStuck, reason: .loop, end: 15) ? "換" : "不換", "換",
+          "卡住重轉：前半段還卡（標註留著）、後半段救回來 → 換")
+    let retryFewer = WhisperClean.Result(pieces: [retryPiece("我們", 0, 1)])
+    check(LoopRetry.accept(original: retryStuck, retry: retryFewer, reason: .loop, end: 15) ? "換" : "不換", "不換", "卡住重轉反例：重轉的字比較少不換")
+    let retryHallucination = WhisperClean.Result(pieces: [retryPiece("我們先算這一列，然後就要換位答案是第二個", 0, 12)], hallucinations: 1)
+    check(LoopRetry.accept(original: retryStuck, retry: retryHallucination, reason: .loop, end: 15) ? "換" : "不換", "不換", "卡住重轉反例：重轉出現幻覺句不換")
+    let retryOutside = WhisperClean.Result(pieces: [retryPiece("我們先算這一列，然後就要換位", 0, 4), retryPiece("答案是第二個，因為分母不能是零", 16, 18)])
+    check(LoopRetry.accept(original: retryStuck, retry: retryOutside, reason: .loop, end: 15) ? "換" : "不換", "不換", "卡住重轉反例：時間跑到這段聲音外面不換")
+    let retryEmpty = WhisperClean.Result(pieces: [retryPiece("", 0, 15)])
+    check(LoopRetry.accept(original: retryEmpty, retry: retryBetter, reason: .empty, end: 15) ? "換" : "不換", "換", "沒字重轉：補到一句以上乾淨的字 → 換")
+    check(LoopRetry.accept(original: retryEmpty, retry: WhisperClean.Result(pieces: [retryPiece("謝謝大家", 3, 4)]), reason: .empty, end: 15) ? "換" : "不換", "不換",
+          "沒字重轉反例：只補到短短一句（多半是沒人講話時的幻覺）不換")
+    check(LoopRetry.accept(original: retryEmpty, retry: retryStillStuck, reason: .empty, end: 15) ? "換" : "不換", "不換", "沒字重轉反例：重轉的又卡住不換")
 }

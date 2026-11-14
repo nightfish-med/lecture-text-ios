@@ -386,7 +386,7 @@ private struct RecheckView: View {
     let item: CardRecheck
     /// 按「套用」第幾個猜測；nil＝只看（結果畫面）
     var onApply: ((Int) -> Void)? = nil
-    @State private var open = false
+    @State private var isOpen = false
 
     private var summary: String {
         let text = (item.conclusion ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
@@ -413,27 +413,27 @@ private struct RecheckView: View {
                 Text("重查：" + (item.note ?? "沒查到"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    .lineLimit(open ? nil : 1)
-                    .onTapGesture { open.toggle() }
+                    .lineLimit(isOpen ? nil : 1)
+                    .onTapGesture { isOpen.toggle() }
             case .done:
                 Button {
-                    open.toggle()
+                    isOpen.toggle()
                 } label: {
                     HStack(alignment: .firstTextBaseline, spacing: 4) {
-                        Image(systemName: open ? "chevron.down" : "chevron.right")
+                        Image(systemName: isOpen ? "chevron.down" : "chevron.right")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                         Text(summary)
                             .font(.footnote.weight(.semibold))
                             .foregroundStyle(Color.primary)
-                            .lineLimit(open ? nil : 1)
+                            .lineLimit(isOpen ? nil : 1)
                             .multilineTextAlignment(.leading)
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .accessibilityLabel(open ? "收合重查" : "展開重查")
+                .accessibilityLabel(isOpen ? "收合重查" : "展開重查")
                 // 還沒按的猜測：原字 → 猜測＋「套用」
                 ForEach(Array((item.maybe ?? []).enumerated()), id: \.offset) { index, guess in
                     if guess.applied == nil {
@@ -454,7 +454,7 @@ private struct RecheckView: View {
                         .padding(.leading, 14)
                     }
                 }
-                if open {
+                if isOpen {
                     details
                         .padding(.leading, 14)
                 }

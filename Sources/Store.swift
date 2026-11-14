@@ -143,6 +143,13 @@ enum Store {
         return try? JSONDecoder().decode(ReviewLog.self, from: data)
     }
 
+    /// v0.28.0：檔名、自動上傳用的課名（ClassRecord.namingCourse）：這場的課名；沒有才讀改字紀錄裡錄音中指定的課名。
+    /// 沒課名時要讀檔，不要在畫面上每次重算時叫。錄音檔和稿的資料夾照舊用 run.course（不搬檔）
+    static func namingCourse(of run: SavedRun) -> String? {
+        if let own = ClassRecord.namingCourse(run: run.course, review: nil) { return own }
+        return ClassRecord.namingCourse(run: nil, review: loadReview(of: run)?.course)
+    }
+
     /// v0.26.0 即時模式 1：每批一張卡（「… 卡片.json」；raw、expanded 是稿的字，只存在這個檔）
     static func cardsFile(of run: SavedRun) -> URL {
         file(of: run, " 卡片.json")
@@ -278,15 +285,17 @@ enum Store {
         let root = manager.temporaryDirectory.appendingPathComponent(scratch, isDirectory: true)
         try? manager.removeItem(at: root)   // 上一次匯出的暫存
         try manager.createDirectory(at: root, withIntermediateDirectories: true)
+        // v0.28.0：檔名的課名＝這場的課名；錄音中才指定的（只給 Haiku 的）也算，不然叫「未分類」
+        let nameCourse = run.flatMap { Store.namingCourse(of: $0) }
 
         if kind == .classRecord, let run {
-            let file = root.appendingPathComponent(ClassRecord.rawFileName(stamp: stamp, course: run.course))
+            let file = root.appendingPathComponent(ClassRecord.rawFileName(stamp: stamp, course: nameCourse))
             try run.rawTranscript(engine: engine).write(to: file, atomically: true, encoding: .utf8)
             return file
         }
 
         guard kind != .errorsOnly, kind != .classRecord, let run else {
-            let file = root.appendingPathComponent(ClassRecord.exportFileName(.errors, stamp: stamp, course: run?.course))
+            let file = root.appendingPathComponent(ClassRecord.exportFileName(.errors, stamp: stamp, course: nameCourse))
             try report.write(to: file, atomically: true, encoding: .utf8)
             return file
         }
@@ -354,7 +363,7 @@ enum Store {
         try (listing.joined(separator: "\n") + "\n").write(to: folder.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8)
 
         // v0.21：zip 檔名照原始轉錄的規則（正式課名、錄音開始的日期與時分）
-        let zip = root.appendingPathComponent(ClassRecord.exportFileName(kind == .withAudio ? .withAudio : .session, stamp: stamp, course: run.course))
+        let zip = root.appendingPathComponent(ClassRecord.exportFileName(kind == .withAudio ? .withAudio : .session, stamp: stamp, course: nameCourse))
         var coordinationError: NSError?
         var moveError: Error?
         NSFileCoordinator().coordinate(readingItemAt: folder, options: [.forUploading], error: &coordinationError) { zipped in
@@ -528,6 +537,8 @@ struct SavedRun: Codable {
     var partStamps: [String]? = nil
     /// v0.27.0 起：錄音時的場景（lecture／discussion／chat，RecordScene）；nil＝舊稿或選來的檔
     var scene: String? = nil
+    /// v0.28.0 起：錄音中斷的地方（看門狗看到停了、又接回來；RecordGap）。nil＝沒斷過或舊稿
+    var gaps: [RecordGap]? = nil
 
     /// 畫面最上面的標題：改過的 → 「11/10 幾何」（照課表）→ 「11/10 10:20」（App 錄的、不在上課時段）→ 選來的檔用原檔名。
     var displayTitle: String {
@@ -599,6 +610,10 @@ struct SavedRun: Codable {
             head.append("時長：\(formatStamp(recordingAt))（複製當下）")
         } else if let audioSeconds {
             head.append("時長：\(formatStamp(audioSeconds))")
+        }
+        // v0.28.0：錄音中斷過就寫一行（分人、Apple 定稿的稿沒辦法在字中間標，這行至少看得到）
+        if let note = GapMarks.headLine(gaps ?? []) {
+            head.append(note)
         }
         head.append("來源：\(origin ?? source)")
         // v0.27.1：錄音時的場景（以前的課清單讀這行）

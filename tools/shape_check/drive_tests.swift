@@ -19,6 +19,17 @@ func driveTests(_ check: @escaping (String, String, String) -> Void) {
     check(skip(DrivePlan.decide(configured: true, signedIn: true, enabled: true, course: "幾何")), "傳", "上傳：幾何、登入、開著 → 傳")
     check(skip(DrivePlan.decide(configured: true, signedIn: true, enabled: true, course: "解析幾何")), "傳", "上傳：正式課名也認得")
     check(DrivePlan.Skip.privateCourse.rawValue, "私人課程不傳", "上傳：私人課程的紀錄字")
+    // v0.28.0：錄音中才指定課名（這場的課名空的）：命名、上傳用改字紀錄裡的課名；空白當沒有；私人課程照樣擋
+    check(ClassRecord.namingCourse(run: "幾何", review: "木工實作") ?? "nil", "幾何", "命名課名：這場有課名就用這場的")
+    check(ClassRecord.namingCourse(run: nil, review: "解析幾何") ?? "nil", "解析幾何", "命名課名：這場沒課名用錄音中指定的")
+    check(ClassRecord.namingCourse(run: "", review: "解析幾何") ?? "nil", "解析幾何", "命名課名：這場課名空字串當沒有")
+    check(ClassRecord.namingCourse(run: nil, review: " ") ?? "nil", "nil", "命名課名：都沒有（討論會沒課名時紀錄是空的）")
+    check(ClassRecord.exportFileName(.session, stamp: "20261113-091500", course: ClassRecord.namingCourse(run: nil, review: "解析幾何")),
+          "20261113_解析幾何_App匯出_0915.zip", "命名課名：zip 不再叫未分類")
+    check(skip(DrivePlan.decide(configured: true, signedIn: true, enabled: true, course: ClassRecord.namingCourse(run: nil, review: "解析幾何"))), "傳",
+          "上傳：錄音中才指定的課名也傳")
+    check(skip(DrivePlan.decide(configured: true, signedIn: true, enabled: true, course: ClassRecord.namingCourse(run: nil, review: "私人課"))), "privateCourse",
+          "上傳：錄音中指定的是私人課程照樣不傳")
     check(DrivePlan.Skip.unknownCourse.rawValue, "不在設定檔的課不傳", "上傳：不在設定檔的課的紀錄字")
 
     // ---- 資料夾與檔名

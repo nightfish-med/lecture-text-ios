@@ -112,3 +112,101 @@ enum MicShare {
         shared ? "麥克風：和別的 App 共用（playAndRecord＋mixWithOthers）" : "麥克風：獨佔（record）"
     }
 }
+
+/// v0.28.0：獨佔麥克風（.record）在背景被打斷後接不回來時，這場暫時改成和別的 App 共用再接一次。
+/// 起因：真機一場錄音在背景被打斷，打斷結束後 setActive 回 '!pla'，之後是 '!int'（背景不能啟用不能混音的聲音工作階段），
+/// 接不回來以後 App 在背景被系統暫停，回前景才接回，中間十幾分鐘沒錄到。
+/// 【推論，未實機驗證】可混音的工作階段在背景可以啟用。只在獨佔、碰到這兩個錯誤碼、這場還沒改過時試；
+/// 改了還是不行就改回獨佔，照原本的流程（快速重試、看門狗）。接回來以後這場維持共用到按停止（錄音中換回獨佔要重設類別，可能又斷一次）；下一場照開關重設。
+enum MicFallback {
+    /// '!int'（0x21696E74）、'!pla'（0x21706C61）：AVAudioSession 的 NSOSStatusErrorDomain 錯誤碼
+    static let codes: Set<Int> = [560557684, 561015905]
+
+    static func shouldTryShared(code: Int, shareMic: Bool, alreadyShared: Bool) -> Bool {
+        !shareMic && !alreadyShared && codes.contains(code)
+    }
+}
+
+/// v0.28.0：錄音中斷的一段（看門狗看到停了、之後又接回來）。存進這場（SavedRun.gaps，場的 json），
+/// 停止後的逐字稿、md、PDF 在那個錄音位置插一行〔錄音中斷…〕，稿頭也寫一行。
+/// 起因：錄音接起來是連著的，中間少了十幾分鐘，稿裡看不出來（前後兩個人講的話接得像同一個人）。
+struct RecordGap: Codable, Equatable {
+    /// 整場錄音第幾秒斷的（續錄從第一段開頭算）
+    var at: Double
+    /// 少了幾秒（牆上時間過了、錄音沒長的那段）
+    var lost: Double
+    /// 牆上時間起訖（yyyyMMdd-HHmmss）
+    var from: String
+    var to: String
+
+    /// 稿裡那一行：〔錄音中斷 2:05（10:01–10:03），這段沒錄到〕
+    var line: String {
+        "〔錄音中斷 \(RecordWatch.clock(lost))（\(Self.hourMinute(from))–\(Self.hourMinute(to))），這段沒錄到〕"
+    }
+
+    /// 稿頭、紀錄用：錄音 12:34 處少了 2:05（10:01–10:03）
+    var spot: String {
+        "錄音 \(RecordWatch.clock(at)) 處少了 \(RecordWatch.clock(lost))（\(Self.hourMinute(from))–\(Self.hourMinute(to))）"
+    }
+
+    /// yyyyMMdd-HHmmss → HH:mm；格式不對寫 ?
+    static func hourMinute(_ stamp: String) -> String {
+        let c = Array(stamp)
+        guard c.count == 15, c[8] == "-" else { return "?" }
+        return "\(String(c[9..<11])):\(String(c[11..<13]))"
+    }
+
+    /// 牆上時間 → yyyyMMdd-HHmmss（和 Store.timestamp 同一個格式）
+    static func stamp(_ date: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        return formatter.string(from: date)
+    }
+}
+
+/// v0.28.0：依錄音位置把中斷標記排進一串有開始時間的塊（卡片、段落）。逐字稿、md、PDF 共用這個順序。
+enum GapMarks {
+    enum Slot: Equatable {
+        /// 第幾個塊（starts 的索引）
+        case block(Int)
+        case gap(RecordGap)
+    }
+
+    /// starts 要先依時間排好。每個中斷放在第一個「開始時間 ≥ 中斷位置」的塊前面（斷在一張卡中間＝排在那張卡後面）；
+    /// 比全部塊都晚的接在最後。中斷照位置排。
+    static func order(starts: [Double], gaps: [RecordGap]) -> [Slot] {
+        let sorted = gaps.sorted { $0.at < $1.at }
+        var out: [Slot] = []
+        var next = 0
+        for (index, start) in starts.enumerated() {
+            while next < sorted.count, sorted[next].at <= start {
+                out.append(.gap(sorted[next]))
+                next += 1
+            }
+            out.append(.block(index))
+        }
+        while next < sorted.count {
+            out.append(.gap(sorted[next]))
+            next += 1
+        }
+        return out
+    }
+
+    /// 有開始時間的塊插好中斷那一行，依序回傳（空的塊照樣留著，呼叫的人自己濾）
+    static func insert(_ blocks: [(start: Double, text: String)], gaps: [RecordGap]) -> [String] {
+        order(starts: blocks.map { $0.start }, gaps: gaps).map { slot -> String in
+            switch slot {
+            case .block(let index): return blocks[index].text
+            case .gap(let gap): return gap.line
+            }
+        }
+    }
+
+    /// 稿頭一行：「錄音中斷：錄音 12:34 處少了 2:05（10:01–10:03）、…；這些時間沒錄到」；沒有中斷＝nil
+    static func headLine(_ gaps: [RecordGap]) -> String? {
+        guard !gaps.isEmpty else { return nil }
+        let spots = gaps.sorted { $0.at < $1.at }.map { $0.spot }
+        return "錄音中斷：" + spots.joined(separator: "、") + "；這些時間沒錄到"
+    }
+}

@@ -387,10 +387,26 @@ enum CardText {
     }
 
     /// 停止後的逐字稿：各卡（依時間）的擴寫接起來，一張卡一段；沒整理到的用原稿；還沒進卡的原稿（tail）接在最後
-    static func transcript(_ cards: [LiveCard], tail: String = "") -> String {
-        let parts = cards.sorted { $0.start < $1.start }.map { $0.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines) }
-            + [tail.trimmingCharacters(in: .whitespacesAndNewlines)]
+    /// v0.28.0：gaps＝這段錄音中斷的地方，照錄音位置在卡和卡之間插一段〔錄音中斷…〕（GapMarks）
+    static func transcript(_ cards: [LiveCard], tail: String = "", gaps: [RecordGap] = []) -> String {
+        let blocks: [(start: Double, text: String)] = cards.sorted { $0.start < $1.start }.map { card in
+            (start: card.start, text: card.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines))
+        }
+        let parts = GapMarks.insert(blocks, gaps: gaps) + [tail.trimmingCharacters(in: .whitespacesAndNewlines)]
         return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
+    }
+
+    /// v0.28.0：錄音中才指定課名時，之前已經轉出的字照開始時間每 seconds 秒切一段（每段排一張卡）；沒字的小段照樣跟著時間走
+    static func earlierChunks(_ pieces: [TimedPiece], seconds: Double = 60) -> [[TimedPiece]] {
+        var chunks: [[TimedPiece]] = []
+        for piece in pieces {
+            if let first = chunks.last?.first, piece.start - first.start < seconds {
+                chunks[chunks.count - 1].append(piece)
+            } else {
+                chunks.append([piece])
+            }
+        }
+        return chunks
     }
 
     /// v0.28.0：重點是固定字樣（「（這段聽不清）」「（現場口令）」這類整句包在全形括號裡）＝這段沒有內容，畫面淡化

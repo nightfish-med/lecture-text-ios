@@ -49,6 +49,8 @@ final class AudioPump: @unchecked Sendable {
     private let shareMic: Bool
     /// v0.26.1：快速重試的代號；又被打斷、停止時加一，排好的重試就不跑
     private var quickToken = 0
+    /// v0.28.0：獨佔麥克風接不回來，這場已經暫時改成和別的 App 共用（MicFallback）；維持到按停止
+    private var fellBackToShared = false
 
     var seconds: Double {
         lock.lock()
@@ -146,7 +148,7 @@ final class AudioPump: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            try? Self.setCategory(shared: self.shareMic)
+            try? Self.setCategory(shared: self.shareMic || self.fellBackToShared)
             self.onEvent("系統聲音服務重開了；\(self.recover())")
         })
     }
@@ -202,19 +204,33 @@ final class AudioPump: @unchecked Sendable {
         if engine.isRunning {
             return (true, "麥克風還在收")
         }
+        // v0.28.0：獨佔接不回來（'!int'／'!pla'）就這場暫時改成共用再接一次；改了還是不行就改回獨佔，照原本的流程走
+        var switched = ""
         do {
             try AVAudioSession.sharedInstance().setActive(true)
         } catch {
-            return (false, "接不回來（聲音被別的 App 或系統佔著）：\(error.localizedDescription)\(Self.code(error))")
+            let failed = "接不回來（聲音被別的 App 或系統佔著）：\(error.localizedDescription)\(Self.code(error))"
+            guard MicFallback.shouldTryShared(code: (error as NSError).code, shareMic: shareMic, alreadyShared: fellBackToShared) else {
+                return (false, failed)
+            }
+            do {
+                try Self.setCategory(shared: true)
+                try AVAudioSession.sharedInstance().setActive(true)
+            } catch let retry {
+                try? Self.setCategory(shared: false)
+                return (false, "\(failed)；改成和別的 App 共用再試也不行：\(retry.localizedDescription)\(Self.code(retry))")
+            }
+            fellBackToShared = true
+            switched = "獨佔麥克風接不回來\(Self.code(error))，這場改成和別的 App 共用到按停止（別的 App 的聲音可能一起錄進去）；"
         }
         engine.inputNode.removeTap(onBus: 0)
         do {
             try installTap()
             engine.prepare()
             try engine.start()
-            return (true, "已接回麥克風（\(Self.currentInput())）")
+            return (true, "\(switched)已接回麥克風（\(Self.currentInput())）")
         } catch {
-            return (false, "接不回來：\(error.localizedDescription)\(Self.code(error))")
+            return (false, "接不回來：\(error.localizedDescription)\(Self.code(error))" + (switched.isEmpty ? "" : "（\(switched)）"))
         }
     }
 

@@ -28,6 +28,18 @@ func sessionTests(_ check: @escaping (String, String, String) -> Void) {
                                                   cards: [a], speakerText: "A：甲。\n\nB：乙。")
     check(spoken.components(separatedBy: "---\n\n").last ?? "", "A：甲。\n\nB：乙。\n", "逐字稿：有分人就用分好人的整份")
     check(spoken.contains("- 校正依據：沒有") && spoken.contains("- 投影片頁碼：每節標題的 p.N") ? "對" : spoken, "對", "逐字稿：沒有投影片")
+    // v0.28.0：錄音中斷：稿頭一行；沒分人時照錄音位置插在卡和卡之間（時間是編的）
+    let cut = RecordGap(at: 30, lost: 600, from: "20261113-091530", to: "20261113-092530")
+    let broken = SessionExport.transcriptDocument(stamp: "20261113-091500", course: "某討論", device: "iPad", slides: "lecture-3",
+                                                  cards: [b, a], speakerText: nil, gaps: [cut])
+    check(broken.contains("- 投影片頁碼：每節標題的 p.N\n- 錄音中斷：錄音 0:30 處少了 10:00（09:15–09:25）；這些時間沒錄到\n\n---\n") ? "對" : broken, "對",
+          "逐字稿：稿頭寫錄音中斷")
+    check(broken.components(separatedBy: "---\n\n").last ?? "",
+          "## 00:00–01:00　p.3\n\n第一段。\n改好的字。\n\n〔錄音中斷 10:00（09:15–09:25），這段沒錄到〕\n\n## 01:00–02:00\n\n第二段沒整理到\n", "逐字稿：錄音中斷插在卡和卡之間")
+    let brokenSpoken = SessionExport.transcriptDocument(stamp: "20261113-091500", course: nil, device: "iPhone", slides: nil,
+                                                        cards: [a], speakerText: "A：甲。\n\nB：乙。", gaps: [cut])
+    check(brokenSpoken.components(separatedBy: "---\n\n").last ?? "", "A：甲。\n\nB：乙。\n", "逐字稿：分好人的整份不插（只有稿頭那行）")
+    check(brokenSpoken.contains("- 錄音中斷：錄音 0:30 處") ? "對" : brokenSpoken, "對", "逐字稿：分好人的也有稿頭那行")
 
     // ---- PDF：圖縮放、分頁
     func size(_ s: (width: Double, height: Double)) -> String { String(format: "%.0fx%.0f", s.width, s.height) }

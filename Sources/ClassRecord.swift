@@ -16,6 +16,18 @@ enum ClassRecord {
         return CourseSchedule.folderName(CourseSchedule.formalName(short))
     }
 
+    /// v0.28.0：檔名、自動上傳用的課名：這場的課名（run）；沒有就用錄音中才指定給 Haiku 的課名（review＝改字紀錄的 course）。
+    /// 空白當沒有。起因：錄音中才指定課名時這場的課名是空的，檔名變「未分類」、自動上傳說沒課名不傳。
+    /// 私人課程照樣擋：DrivePlan.decide 拿同一個課名判斷。
+    static func namingCourse(run: String?, review: String?) -> String? {
+        for name in [run, review] {
+            if let name, !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return name
+            }
+        }
+        return nil
+    }
+
     /// yyyyMMdd-HHmmss 的前 8 碼
     static func day(_ stamp: String) -> String {
         let c = Array(stamp)

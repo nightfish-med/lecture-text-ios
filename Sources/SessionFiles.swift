@@ -25,8 +25,9 @@ enum SessionExport {
 
     /// 逐字稿 md：照固定的逐字稿格式寫稿頭；內文有分人＝整份（A：…），否則每張卡一節（時間、頁碼）。
     /// slides＝這場用的投影片名字（nil＝沒有）。
+    /// v0.28.0：gaps＝錄音中斷的地方：稿頭寫一行；沒分人時照錄音位置在卡和卡之間插一行〔錄音中斷…〕（分人的整份沒辦法插，只有稿頭那行）
     static func transcriptDocument(stamp: String, course: String?, device: String, slides: String?,
-                                   cards: [LiveCard], speakerText: String?) -> String {
+                                   cards: [LiveCard], speakerText: String?, gaps: [RecordGap] = []) -> String {
         let name = ClassRecord.courseName(course)
         let pages = cards.contains { $0.page != nil }
         var lines = [
@@ -36,20 +37,29 @@ enum SessionExport {
             "- 校正依據：" + (slides.map { "投影片 \($0)" } ?? "沒有"),
             "- 處理說明：Haiku 擴寫式校正（只改聽錯的字、補標點，不摘要）；使用者在錄音中改的行、Pencil 重查改的字已套用；沒整理到的卡用 Whisper 原字",
             "- 投影片頁碼：" + (pages ? "每節標題的 p.N" : "未標註"),
-            "",
-            "---",
-            "",
         ]
+        if let note = GapMarks.headLine(gaps) {
+            lines.append("- " + note)
+        }
+        lines += ["", "---", ""]
         if let speakerText, !speakerText.isEmpty {
             lines.append(speakerText.trimmingCharacters(in: .whitespacesAndNewlines))
         } else {
-            for card in cards.sorted(by: { $0.start < $1.start }) {
-                let body = card.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
-                guard !body.isEmpty else { continue }
-                lines.append("## " + CardText.range(card) + (card.page.map { "　p.\($0)" } ?? ""))
-                lines.append("")
-                lines.append(CardDiff.lines(body))
-                lines.append("")
+            let sorted = cards.sorted(by: { $0.start < $1.start })
+            for slot in GapMarks.order(starts: sorted.map { $0.start }, gaps: gaps) {
+                switch slot {
+                case .gap(let gap):
+                    lines.append(gap.line)
+                    lines.append("")
+                case .block(let index):
+                    let card = sorted[index]
+                    let body = card.transcriptText.trimmingCharacters(in: .whitespacesAndNewlines)
+                    guard !body.isEmpty else { continue }
+                    lines.append("## " + CardText.range(card) + (card.page.map { "　p.\($0)" } ?? ""))
+                    lines.append("")
+                    lines.append(CardDiff.lines(body))
+                    lines.append("")
+                }
             }
         }
         return lines.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines) + "\n"

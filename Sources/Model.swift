@@ -227,6 +227,14 @@ final class AppModel {
     /// 這段真的開始收音的時間（牆上時間從這裡算）。
     @ObservationIgnored private var partStartedAt: Date?
     @ObservationIgnored private var lastRecoverTry = Date.distantPast
+    /// v0.28.0：這場錄音中斷的地方（續錄＝前幾段的也在；beginRun 寫進 run.gaps，接回來時也直接加進 run.gaps）
+    @ObservationIgnored private var sessionGaps: [RecordGap] = []
+    /// 這一段（續錄的新段）的中斷從 sessionGaps 第幾個開始
+    @ObservationIgnored private var partGapStart = 0
+    /// 看門狗報停時：停在整場第幾秒、牆上時間從什麼時候開始沒聲音（接回來時存成一段中斷）
+    @ObservationIgnored private var stallSpot: (at: Double, since: Date)?
+    /// v0.28.0 rawRecordName 用：這場沒課名時改字紀錄裡的課名（要讀檔，同一場只讀一次；錄音中指定課名、補送完清掉）
+    @ObservationIgnored private var reviewCourseCache: (stamp: String, course: String?)?
 
     /// v0.14：點一句從那裡播。
     let player: Playback
@@ -485,6 +493,9 @@ final class AppModel {
         let url = target ?? Store.recordingsFolder(course: pendingCourse).appendingPathComponent("\(Store.timestamp()).caf")
         liveURL = url
         sessionLog = continuing?.base.log ?? []
+        // v0.28.0：續錄接著原場的中斷紀錄；這一段新的從後面接
+        sessionGaps = continuing?.base.gaps ?? []
+        partGapStart = sessionGaps.count
         stopStamp = nil
         phase = .preparing  // 擋連按兩下
         // 還沒熱好就按：不等，馬上開始收音。熱好的那份這次不用，錄完再熱
@@ -703,10 +714,12 @@ final class AppModel {
                 let head = continuing?.head ?? ""
                 let part = continuing?.part
                 let turns = cardTurns
+                // v0.28.0：只給這一段的中斷（前幾段的字在 head 裡，當時已經標過）
+                let gaps = Array(sessionGaps.dropFirst(partGapStart))
                 Task {
                     let unsent = await flush.value
                     let swapped = await finishReview(review, unsent: unsent, finalRun: finalRun, finalPieces: finalPieces, finalDone: done, head: head,
-                                                     turns: turns, part: part)
+                                                     turns: turns, part: part, gaps: gaps)
                     // v0.27.1：有卡片的場停止後自動跳出分享（逐字稿 md＋重點 PDF）；已經開始下一場就不跳
                     if review.cardMode, let shown = swapped, run?.startedStamp == shown.startedStamp, !isBusy {
                         await prepareSessionShare(shown)
@@ -730,7 +743,9 @@ final class AppModel {
     /// 打包在背景、失敗只記一行，不跳警告、不擋下一場錄音。錯誤資料（info.txt）用當下的；已經換到別場就用停止當下存的那份。
     private func autoUpload(_ target: SavedRun?, fallbackReport: String) {
         guard let target else { return }
-        if let skip = DrivePlan.decide(configured: drive.configured, signedIn: drive.signedIn, enabled: drive.enabled, course: target.course) {
+        // v0.28.0：課名和檔名用同一個（錄音中才指定的也算）；私人課程照樣用這個課名擋
+        let course = Store.namingCourse(of: target)
+        if let skip = DrivePlan.decide(configured: drive.configured, signedIn: drive.signedIn, enabled: drive.enabled, course: course) {
             // 沒設定、沒登入、關著不提；私人課程和沒課名在登入又開著時記一行，看得出為什麼沒傳
             if drive.configured, drive.signedIn, drive.enabled {
                 log("自動上傳：這場不傳（\(skip.rawValue)）", toRun: false)
@@ -769,6 +784,7 @@ final class AppModel {
         watch = RecordWatch()
         partStartedAt = Date()
         stallNote = nil
+        stallSpot = nil
         lastRecoverTry = .distantPast
         watchTask?.cancel()
         // v0.22：背景看門狗通知要的權限（第一次會問；拒絕了照樣錄音，只是不會通知）
@@ -788,11 +804,24 @@ final class AppModel {
                 switch self.watch.tick(wall: wall, audio: audio) {
                 case .stalled(let at, let silent)?:
                     let spot = formatClock((self.continuing?.offset ?? 0) + at)
+                    // v0.28.0：停在整場第幾秒、牆上時間從什麼時候沒聲音（接回來時存成一段中斷）
+                    self.stallSpot = (at: (self.continuing?.offset ?? 0) + at, since: Date().addingTimeInterval(-silent))
                     self.log("錄音停了：整場 \(spot) 起 \(Int(silent)) 秒沒有聲音進來（App 在\(self.backgroundSince == nil ? "前景" : "背景")，麥克風\(live.micRunning ? "開著但沒給聲音" : "被關了")）；\(live.recover())")
                     self.lastRecoverTry = Date()
                     UINotificationFeedbackGenerator().notificationOccurred(.error)
                 case .resumed(let lost)?:
-                    self.log("聲音又進來了：中間少了 \(formatClock(lost))")
+                    // v0.28.0：存成一段中斷（場的 json 跟著存）；停止後逐字稿、md、PDF 在那個錄音位置插一行〔錄音中斷…〕
+                    let now = Date()
+                    let gap = RecordGap(at: self.stallSpot?.at ?? ((self.continuing?.offset ?? 0) + audio),
+                                        lost: lost,
+                                        from: RecordGap.stamp(self.stallSpot?.since ?? now.addingTimeInterval(-lost)),
+                                        to: RecordGap.stamp(now))
+                    self.stallSpot = nil
+                    self.sessionGaps.append(gap)
+                    var gaps = self.run?.gaps ?? []
+                    gaps.append(gap)
+                    self.run?.gaps = gaps
+                    self.log("聲音又進來了：中間少了 \(formatClock(lost))（\(gap.spot)）")
                     self.stallNote = nil
                     alerted = false
                 case nil:
@@ -880,6 +909,8 @@ final class AppModel {
             next.systemVersion = UIDevice.current.systemVersion
             next.appVersion = AppInfo.version
             next.log = sessionLog.isEmpty ? nil : sessionLog
+            // v0.28.0：Apple 定稿再跑一次 beginRun 也留得住錄音中斷的紀錄
+            next.gaps = sessionGaps.isEmpty ? nil : sessionGaps
             run = next
             return
         }
@@ -901,6 +932,7 @@ final class AppModel {
         // v0.21：第 1 段的開始＝錄音檔名的時間（按下錄音）；選來的檔用轉成文字的時間
         fresh.partStamps = [fresh.recordedStamp ?? fresh.startedStamp]
         fresh.scene = sceneForRun
+        fresh.gaps = sessionGaps.isEmpty ? nil : sessionGaps
         run = fresh
     }
 
@@ -930,6 +962,8 @@ final class AppModel {
         player.unload()
         anchor = nil
         sessionLog = []
+        sessionGaps = []
+        partGapStart = 0
         stopStamp = nil
         phase = .copying
         job = Task {
@@ -1669,6 +1703,16 @@ final class AppModel {
             guard reviewer == nil, let formal else { return }
             log("錄音中指定課名：\(formal)")
             startReviewer(course: formal)
+            reviewCourseCache = nil
+            // v0.28.0：指定之前 Whisper 已經轉出的字（這一段）補交給審稿器，開頭的字才進得了卡片和逐字稿。
+            // 以前只交指定之後的新字，開頭那幾分鐘只在原文檔。pieces 在 append 時已經加過續錄位移，這裡不再加；只交一次（之後的新字走 appendLive）
+            if let review = reviewer, whisperMain, review.cardMode {
+                let earlier = Array(pieces.dropFirst(continuing?.basePieces.count ?? 0))
+                if earlier.contains(where: { !$0.text.isEmpty }) {
+                    review.addEarlier(earlier, offsetBefore: (continuing?.head ?? "").count, offsetAfter: run?.text.count ?? 0)
+                    log("錄音中指定課名：之前已轉出的 \(earlier.count) 小段補交給 Haiku")
+                }
+            }
             showBanner(reviewer == nil ? ReviewText.closed(reviewOffReason) : "這場的 Haiku 照「\(formal)」送")
         } else {
             chosenCourse = formal
@@ -1718,7 +1762,8 @@ final class AppModel {
     /// v0.26.0 模式 1：逐字稿換成各卡的擴寫接起來（原字照舊在「… 原文.txt」＝raw.txt），回傳換過的那場（自動上傳用）。
     @discardableResult
     private func finishReview(_ review: LiveReviewer, unsent: Int, finalRun: SavedRun?, finalPieces: [TimedPiece], finalDone: Bool,
-                              head: String = "", turns: [SpeakerTurn]? = nil, part: Int? = nil) async -> SavedRun? {
+                              head: String = "", turns: [SpeakerTurn]? = nil, part: Int? = nil,
+                              gaps: [RecordGap] = []) async -> SavedRun? {
         if finalDone, !finalPieces.isEmpty {
             await review.annotateFinal(text: TextCleanup.fix(finalPieces.map(\.text).joined()), pieces: finalPieces)
         }
@@ -1730,7 +1775,7 @@ final class AppModel {
         var swapped: SavedRun?
         if review.cardMode, let finalRun {
             let cards = review.cards
-            var body = review.cardTranscript()
+            var body = review.cardTranscript(gaps: gaps)
             // v0.27.0 討論會：卡片的每行照時間標講者（A：…）；沒標到就用沒分人的
             var names: [String] = []
             var speakerLine: String?
@@ -1791,6 +1836,7 @@ final class AppModel {
         if reviewer === review {
             reviewer = nil
         }
+        reviewCourseCache = nil
         endReviewBackground()
         var line = "Haiku 停止後補送完：" + data.summaryLine
         if unsent > 0 {
@@ -1873,20 +1919,23 @@ final class AppModel {
             let cards = Store.loadCards(of: target)
             guard !cards.isEmpty else { return ([], "這場沒有卡片") }
             let slides = Store.loadReview(of: target)?.slides
+            // v0.28.0：檔名、標題的課名（錄音中才指定的也算）；錄音中斷的地方插一行
+            let course = Store.namingCourse(of: target)
+            let gaps = target.gaps ?? []
             let stamp = SessionExport.stamp(recorded: target.recordedStamp, started: target.startedStamp)
             let speakerText = (target.speakers ?? []).isEmpty ? nil : target.text
             let folder = FileManager.default.temporaryDirectory.appendingPathComponent("分享", isDirectory: true)
                 .appendingPathComponent(UUID().uuidString, isDirectory: true)
             do {
                 try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-                let md = folder.appendingPathComponent(SessionExport.transcriptName(stamp: stamp, course: target.course))
+                let md = folder.appendingPathComponent(SessionExport.transcriptName(stamp: stamp, course: course))
                 let slideName = slides.map { ($0 as NSString).deletingPathExtension }
-                try SessionExport.transcriptDocument(stamp: stamp, course: target.course, device: device, slides: slideName,
-                                                     cards: cards, speakerText: speakerText).write(to: md, atomically: true, encoding: .utf8)
-                let pdf = folder.appendingPathComponent(SessionExport.cardsPDFName(stamp: stamp, course: target.course))
-                let formal = target.course.map(CourseSchedule.formalName) ?? ""
-                let title = "\(ClassRecord.day(stamp)) \(ClassRecord.courseName(target.course)) 重點"
-                try CardsPDF.write(cards: cards, title: title, course: formal, slides: slides, to: pdf)
+                try SessionExport.transcriptDocument(stamp: stamp, course: course, device: device, slides: slideName,
+                                                     cards: cards, speakerText: speakerText, gaps: gaps).write(to: md, atomically: true, encoding: .utf8)
+                let pdf = folder.appendingPathComponent(SessionExport.cardsPDFName(stamp: stamp, course: course))
+                let formal = course.map(CourseSchedule.formalName) ?? ""
+                let title = "\(ClassRecord.day(stamp)) \(ClassRecord.courseName(course)) 重點"
+                try CardsPDF.write(cards: cards, title: title, course: formal, slides: slides, gaps: gaps, to: pdf)
                 return ([md, pdf], nil)
             } catch {
                 return ([], "分享檔產生失敗：\(error.localizedDescription)")
@@ -2171,7 +2220,18 @@ final class AppModel {
     /// v0.21「存成原始轉錄」分享出去的檔名（選單上顯示）
     var rawRecordName: String? {
         guard let run, !run.text.isEmpty else { return nil }
-        return ClassRecord.rawFileName(stamp: run.exportStamp, course: run.course)
+        return ClassRecord.rawFileName(stamp: run.exportStamp, course: shownNamingCourse(run))
+    }
+
+    /// v0.28.0：畫面用的檔名課名（和 Store.namingCourse 同一個規則）。這場沒課名時：錄音中用審稿器的課名；
+    /// 否則讀改字紀錄，結果記住（畫面重算時不重讀檔）
+    private func shownNamingCourse(_ target: SavedRun) -> String? {
+        if let own = ClassRecord.namingCourse(run: target.course, review: nil) { return own }
+        if let review = reviewer { return ClassRecord.namingCourse(run: nil, review: review.course) }
+        if let cache = reviewCourseCache, cache.stamp == target.startedStamp { return cache.course }
+        let found = Store.namingCourse(of: target)
+        reviewCourseCache = (stamp: target.startedStamp, course: found)
+        return found
     }
 
     /// 匯出（含錄音）多大；nil 表示這場在 App 裡沒有錄音檔（選來的原檔轉完就刪了）。

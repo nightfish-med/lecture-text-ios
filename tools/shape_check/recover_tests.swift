@@ -16,4 +16,42 @@ func recoverTests(_ check: @escaping (String, String, String) -> Void) {
     check(RecoverRetry.delay(afterRetries: -1).map { "\($0)" } ?? "不再試", "不再試", "快速重試：負數不排")
     check(MicShare.line(false), "麥克風：獨佔（record）", "麥克風共用：關＝獨佔")
     check(MicShare.line(true), "麥克風：和別的 App 共用（playAndRecord＋mixWithOthers）", "麥克風共用：開＝playAndRecord＋mixWithOthers")
+
+    // ---- v0.28.0 獨佔麥克風在背景接不回來：只在獨佔、碰到 '!int'／'!pla'、這場還沒改過時，改成共用再接一次
+    check("\(MicFallback.shouldTryShared(code: 0x21696E74, shareMic: false, alreadyShared: false))", "true", "改共用：獨佔、'!int' → 試")
+    check("\(MicFallback.shouldTryShared(code: 0x21706C61, shareMic: false, alreadyShared: false))", "true", "改共用：獨佔、'!pla' → 試")
+    check("\(MicFallback.shouldTryShared(code: 560557684, shareMic: true, alreadyShared: false))", "false", "改共用：本來就共用 → 不用改")
+    check("\(MicFallback.shouldTryShared(code: 561015905, shareMic: false, alreadyShared: true))", "false", "改共用：這場改過了 → 不再改")
+    check("\(MicFallback.shouldTryShared(code: -50, shareMic: false, alreadyShared: false))", "false", "改共用：別的錯誤照原本流程")
+
+    // ---- v0.28.0 錄音中斷的一段：稿裡那行、稿頭、依錄音位置排進卡片之間（時間都是編的）
+    let gapA = RecordGap(at: 754, lost: 125, from: "20260105-100105", to: "20260105-100310")
+    let gapB = RecordGap(at: 2000, lost: 15, from: "20260105-103010", to: "20260105-103025")
+    check(gapA.line, "〔錄音中斷 2:05（10:01–10:03），這段沒錄到〕", "錄音中斷：稿裡那一行（少了多久、牆上時間）")
+    check(gapA.spot, "錄音 12:34 處少了 2:05（10:01–10:03）", "錄音中斷：位置那句")
+    check(RecordGap.hourMinute("壞掉的"), "?", "錄音中斷：時間格式不對寫 ?")
+    let stampFormat = DateFormatter()
+    stampFormat.locale = Locale(identifier: "en_US_POSIX")
+    stampFormat.dateFormat = "yyyyMMdd-HHmmss"
+    check(stampFormat.date(from: "20260105-100105").map(RecordGap.stamp) ?? "nil", "20260105-100105", "錄音中斷：牆上時間寫成 yyyyMMdd-HHmmss")
+    check(GapMarks.headLine([]) ?? "nil", "nil", "錄音中斷：沒斷過不寫稿頭")
+    check(GapMarks.headLine([gapB, gapA]) ?? "nil", "錄音中斷：錄音 12:34 處少了 2:05（10:01–10:03）、錄音 33:20 處少了 0:15（10:30–10:30）；這些時間沒錄到",
+          "錄音中斷：稿頭一行（照位置排）")
+    func slots(_ list: [GapMarks.Slot]) -> String {
+        list.map { slot -> String in
+            switch slot {
+            case .block(let i): return "卡\(i)"
+            case .gap(let g): return "斷@\(Int(g.at))"
+            }
+        }.joined(separator: ",")
+    }
+    func gap(at: Double) -> RecordGap { RecordGap(at: at, lost: 20, from: "20260105-100000", to: "20260105-100020") }
+    check(slots(GapMarks.order(starts: [0, 60, 120], gaps: [gap(at: 200), gap(at: 90), gap(at: 60)])), "卡0,斷@60,卡1,斷@90,卡2,斷@200",
+          "錄音中斷：放在第一個開始時間 ≥ 位置的卡前面；斷在卡中間排在那張後面；比全部晚的接最後")
+    check(slots(GapMarks.order(starts: [], gaps: [gap(at: 5)])), "斷@5", "錄音中斷：還沒有卡也留得住")
+    check(slots(GapMarks.order(starts: [0, 60], gaps: [])), "卡0,卡1", "錄音中斷：沒斷過照原樣")
+    check(GapMarks.insert([(start: 0, text: "甲"), (start: 60, text: "乙")], gaps: [gap(at: 30)]).joined(separator: "|"),
+          "甲|〔錄音中斷 0:20（10:00–10:00），這段沒錄到〕|乙", "錄音中斷：插進有時間的塊之間")
+    let coded = try? JSONEncoder().encode([gapA])
+    check((coded.flatMap { try? JSONDecoder().decode([RecordGap].self, from: $0) } ?? []) == [gapA] ? "一樣" : "不一樣", "一樣", "錄音中斷：存檔讀回一樣")
 }

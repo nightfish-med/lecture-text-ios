@@ -128,6 +128,15 @@ func cardsTests(_ check: @escaping (String, String, String) -> Void) {
     check(CardText.copy([a, b, c]), "[p.3] 導數定義\n老師先複習導數的定義。\n\n例題\n做一題例題。", "卡片複製：[頁碼] 重點＋整理版，沒整理到的不放")
     check(CardText.tidyFile([a, b, c]), "00:00–01:01　p.3\n重點：導數定義\n老師先複習導數的定義。\n不確定：到數→導數\n\n01:01–02:05\n（沒整理到）\n\n02:05–1:01:40\n重點：例題\n做一題例題。\n", "整理版：時間、頁碼、重點、整理版、不確定")
     check(CardText.transcript([c, a, b], tail: "還沒進卡"), "擴寫一。\n\n原稿二\n\n擴寫三。\n\n還沒進卡", "逐字稿：依時間接擴寫，沒整理到用原稿，沒進卡的接最後")
+    // v0.28.0：錄音中斷照錄音位置插在卡和卡之間（第 100 秒斷：在 61 秒開始那張之後、125 秒那張之前）
+    let gapCut = RecordGap(at: 100, lost: 300, from: "20260105-090140", to: "20260105-090640")
+    check(CardText.transcript([c, a, b], tail: "還沒進卡", gaps: [gapCut]),
+          "擴寫一。\n\n原稿二\n\n〔錄音中斷 5:00（09:01–09:06），這段沒錄到〕\n\n擴寫三。\n\n還沒進卡", "逐字稿：錄音中斷那行插在那個位置")
+    // v0.28.0：錄音中才指定課名，之前的字每 60 秒切一段（一段一張卡）
+    let early = [TimedPiece(text: "一", start: 0, end: 5), TimedPiece(text: "二", start: 30, end: 35), TimedPiece(text: "三", start: 59.9, end: 61),
+                 TimedPiece(text: "四", start: 60, end: 70), TimedPiece(text: "", start: 75, end: 90), TimedPiece(text: "五", start: 130, end: 140)]
+    check(CardText.earlierChunks(early).map { $0.map(\.text).joined() }.joined(separator: "|"), "一二三|四|五", "補交之前的字：每 60 秒一段")
+    check("\(CardText.earlierChunks([]).count)", "0", "補交之前的字：沒有字就沒有段")
     // v0.26.1 分享到別的 App 的文字
     check(CardText.share(a), "[p.3] 導數定義\n\n老師先複習導數的定義。\n\n原稿：\n擴寫一。\n\n不確定：到數→導數", "卡片分享：[頁碼] 重點、整理版、原稿、不確定的詞")
     check(CardText.share(b), "原稿：\n原稿二", "卡片分享：沒整理到的卡只有原稿")

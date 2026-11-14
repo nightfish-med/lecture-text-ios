@@ -46,7 +46,8 @@ enum CardsPDF {
     }
 
     /// 寫 PDF 到 url。title：第一頁最上面那行；course：正式課名（找投影片）；slides：投影片原檔名（nil＝這門課最新那份）
-    static func write(cards: [LiveCard], title: String, course: String, slides: String?, to url: URL) throws {
+    /// v0.28.0：gaps＝錄音中斷的地方，照錄音位置在卡和卡之間印一行紅字〔錄音中斷…〕（GapMarks，和逐字稿同一個順序）
+    static func write(cards: [LiveCard], title: String, course: String, slides: String?, gaps: [RecordGap] = [], to url: URL) throws {
         let width = CGFloat(CardsPDFLayout.contentWidth)
         var items: [Item] = []
         var blocks: [CardsPDFLayout.Block] = []
@@ -56,7 +57,15 @@ enum CardsPDF {
         }
         addText(attributed(title, size: 20, weight: .bold), gap: 18)
         var lastPage: Int?
-        for card in cards.sorted(by: { $0.start < $1.start }) {
+        let sortedCards = cards.sorted(by: { $0.start < $1.start })
+        for slot in GapMarks.order(starts: sortedCards.map { $0.start }, gaps: gaps) {
+            guard case .block(let cardIndex) = slot else {
+                if case .gap(let cut) = slot {
+                    addText(attributed(cut.line, size: 11, weight: .semibold, color: .systemRed), gap: 14)
+                }
+                continue
+            }
+            let card = sortedCards[cardIndex]
             let head = CardText.range(card) + (card.page.map { "　p.\($0)" } ?? "")
             addText(attributed(head, size: 10, color: .darkGray), gap: 4, keep: true)
             switch card.state {

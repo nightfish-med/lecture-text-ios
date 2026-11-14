@@ -226,6 +226,20 @@ final class LiveReviewer {
         _ = audioNow()
     }
 
+    /// v0.28.0：錄音中才建審稿器（錄音中才指定課名）時，之前已經轉出的字補進來（時間已含續錄位移）。
+    /// 照約 60 秒切開、一段排一批（一張卡不會太大），排在之後的新字前面。只叫一次；之後的新字照舊走 add
+    func addEarlier(_ pieces: [TimedPiece], offsetBefore: Int, offsetAfter: Int) {
+        guard feeding, !closed, !pieces.isEmpty else { return }
+        let now = audioNow()
+        for chunk in CardText.earlierChunks(pieces) {
+            splitter.add(chunk, offsetBefore: offsetBefore, offsetAfter: offsetAfter)
+            let unsent = splitter.unsent
+            if !unsent.isEmpty {
+                plan(unsent, now: now)
+            }
+        }
+    }
+
     /// 「這場不再改這個詞」：記進 off，相關的改字標 userOff
     func userTurnedOff(_ core: String) {
         guard !core.isEmpty, !log.off.contains(core) else { return }
@@ -1068,12 +1082,13 @@ final class LiveReviewer {
     }
 
     /// 停止後的逐字稿（只有這一段）：各卡的擴寫依時間接起來，沒整理到的用原稿，沒進卡的原稿接在最後
-    func cardTranscript() -> String {
+    /// v0.28.0：gaps＝這一段錄音中斷的地方（續錄前幾段的不要給，前幾段的字在 head 裡已經標過）
+    func cardTranscript(gaps: [RecordGap] = []) -> String {
         let mine = cards.filter { $0.id >= firstBatchID }
         let ids = Set(mine.map(\.id))
         let covered = Set(log.batches.filter { ids.contains($0.id) }.flatMap(\.unitIDs))
         let tail = splitter.units.filter { !covered.contains($0.id) }.map(\.text).joined()
-        return CardText.transcript(mine, tail: tail)
+        return CardText.transcript(mine, tail: tail, gaps: gaps)
     }
 
     private func apply(_ step: ReviewRetry.Step, to batch: inout ReviewBatch, status: Int?) {

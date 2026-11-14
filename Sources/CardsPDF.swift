@@ -61,7 +61,14 @@ enum CardsPDF {
             addText(attributed(head, size: 10, color: .darkGray), gap: 4, keep: true)
             switch card.state {
             case .done:
-                if !card.key.isEmpty { addText(attributed(card.key, size: 17, weight: .bold, spacing: 3), gap: 6, keep: true) }
+                if !card.key.isEmpty {
+                    // v0.28.0：聽不清、現場口令這類固定字樣不用粗體大字（和畫面一樣淡化）
+                    if CardText.isPlaceholderKey(card.key) {
+                        addText(attributed(card.key, size: 12, color: .gray, spacing: 3), gap: 6, keep: true)
+                    } else {
+                        addText(attributed(card.key, size: 17, weight: .bold, spacing: 3), gap: 6, keep: true)
+                    }
+                }
                 if !card.tidy.isEmpty { addText(attributed(card.tidy, size: 12, spacing: 3), gap: 6) }
                 if !card.unsure.isEmpty {
                     addText(attributed("不確定：" + card.unsure.joined(separator: "、"), size: 10, color: .systemOrange), gap: 6)
@@ -78,6 +85,11 @@ enum CardsPDF {
                 }
                 for fix in item.applied ?? [] {
                     addText(attributed("逐字稿已改：\(fix.old) → \(fix.new)", size: 9, color: UIColor(red: 0.06, green: 0.46, blue: 0.43, alpha: 1)), gap: 2)
+                }
+                // v0.28.0：沒把握的猜測（按了套用的已經在「逐字稿已改」）
+                for guess in item.maybe ?? [] where guess.applied != true {
+                    let head = guess.applied == false ? "找不到原字，沒套：" : "可能（沒套用）："
+                    addText(attributed(head + "\(guess.old) → \(guess.new)", size: 9, color: .systemOrange), gap: 2)
                 }
                 if let unsure = item.unsure, !unsure.isEmpty { addText(attributed("沒把握：" + unsure, size: 9, color: .systemOrange), gap: 2) }
             }

@@ -70,6 +70,18 @@ final class LiveReviewer {
     /// v0.27.0：重查（Pencil 圈起來）送出中的件數；停止補送時等它們
     @ObservationIgnored private var rechecksInFlight = 0
     @ObservationIgnored private var nextRecheckID = 1
+    /// v0.28.0：重查一個一個跑（前一個跑完才送下一個；排著的也算在 rechecksInFlight）
+    @ObservationIgnored private var recheckChain: Task<Void, Never>?
+    /// v0.28.0 逐字稿改了之後重算重點：卡片編號 → 可以送的時間（去抖動，再被改就從頭等）
+    @ObservationIgnored private var refreshDue: [Int: Date] = [:]
+    /// 正在送重算的卡（同一張卡同時只有一個）
+    @ObservationIgnored private var refreshRunning: Set<Int> = []
+    /// 送的時候又被改的卡：跑完再跑一次
+    @ObservationIgnored private var refreshAgain: Set<Int> = []
+    /// 畫面「更新中」：排著或正在送重算的卡
+    private(set) var refreshing: Set<Int> = []
+    /// v0.28.0：停止收尾了（補送期限到）：不再送新的重算、重查，晚回來的不套
+    @ObservationIgnored private var wrapped = false
 
     /// base：續錄時原場的改字紀錄（已學規則、off、最大單位編號照舊）
     /// v0.27.0：courseBlock 有給就用它（討論會沒有課名時的中性區塊）；nil＝照課名、對照表、投影片產生
@@ -251,6 +263,7 @@ final class LiveReviewer {
             }
         }
         sendNext()
+        sendRefreshes()
     }
 
     private func plan(_ units: [LiveUnit], now: Double) {
@@ -529,6 +542,10 @@ final class LiveReviewer {
         put(card)
         diffs[id] = diff
         lastPage = CardText.latestPage(cards)
+        // v0.28.0：還在整理時就被改過（或留了說明）：這次回來的重點沒看到那些改動，照改好的逐字稿再重算一次
+        if CardEdits.needsRefresh(card.edits) {
+            scheduleRefresh(id)
+        }
     }
 
     private func failCard(_ id: Int, note: String) {
@@ -637,11 +654,14 @@ final class LiveReviewer {
         save()
         // log 不寫字（改的字、說明都只進卡片.json）
         onEvent(changed ? "使用者改了第 \(cardID) 張卡的一行" : "使用者在第 \(cardID) 張卡留了說明")
+        // v0.28.0：改字、留說明之後照改好的逐字稿重算這張卡的重點和整理版（等幾秒沒再改才送）
+        scheduleRefresh(cardID)
     }
 
     /// Pencil 圈起來：只送圈到的行＋這張卡的重點（不送整份逐字稿），Haiku 帶網路搜尋查。網路錯照卡片的重試；回來後只改圈到的行。
+    /// v0.28.0：重查一個一個跑（前一個還沒回來就先寫「排隊中」）
     func recheck(cardID: Int, lines selected: [Int]) {
-        guard !closed, var card = cards.first(where: { $0.id == cardID }) else { return }
+        guard !closed, !wrapped, var card = cards.first(where: { $0.id == cardID }) else { return }
         let current = CardLines.build(card, diff: diffs[cardID])
         let rows = Array(Set(selected)).sorted().filter { $0 >= 0 && $0 < current.count }
         guard !rows.isEmpty else { return }
@@ -653,7 +673,7 @@ final class LiveReviewer {
             item.state = .failed
             item.note = "Haiku 這場已停（\(stop.short)），沒有送"
         } else {
-            item.note = "上網查資料中…"
+            item.note = rechecksInFlight > 0 ? "排隊中…" : "上網查資料中…"
         }
         card.rechecks = (card.rechecks ?? []) + [item]
         put(card)
@@ -661,9 +681,21 @@ final class LiveReviewer {
         guard stop == nil else { return }
         onEvent("重查：第 \(cardID) 張卡圈了 \(rows.count) 行")
         let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts)
+        enqueueRecheck(cardID: cardID, recheckID: id, message: message)
+    }
+
+    /// 排進重查的隊伍：前一個跑完才開始；收尾了就不送（finalizeCards 已經標「停止時還沒查完」）
+    private func enqueueRecheck(cardID: Int, recheckID: Int, message: String) {
         rechecksInFlight += 1
-        Task {
-            await self.runRecheck(cardID: cardID, recheckID: id, message: message)
+        let previous = recheckChain
+        recheckChain = Task {
+            await previous?.value
+            if !self.closed, !self.wrapped, self.stop == nil {
+                self.updateRecheck(cardID, recheckID) { $0.note = "上網查資料中…" }
+                await self.runRecheck(cardID: cardID, recheckID: recheckID, message: message)
+            } else if !self.closed, !self.wrapped {
+                self.failRecheck(cardID, recheckID, note: "Haiku 這場已停，沒有送")
+            }
             self.rechecksInFlight -= 1
         }
     }
@@ -675,7 +707,7 @@ final class LiveReviewer {
         var attempts = 0
         var cost = 0.0
         var searches = 0
-        while !closed {
+        while !closed, !wrapped {
             let body = try? RecheckPrompt.body(userMessage: message, assistant: assistant)
             guard let body else {
                 failRecheck(cardID, recheckID, note: "請求內容編不出來")
@@ -684,7 +716,7 @@ final class LiveReviewer {
             let outcome = await Task.detached { () -> HaikuOutcome in
                 await HaikuClient.send(body: body, key: apiKey, session: HaikuClient.cardSession, timeout: HaikuClient.cardTimeout)
             }.value
-            guard !closed else { return }
+            guard !closed, !wrapped else { return }
             switch outcome {
             case .failure(let text, let offline):
                 if !offline { attempts += 1 }
@@ -736,7 +768,8 @@ final class LiveReviewer {
                     failRecheck(cardID, recheckID, note: "回覆裡沒有規定的 JSON" + error)
                     return
                 }
-                finishRecheck(cardID, recheckID, reply: reply, sources: RecheckPrompt.sources(all), cost: cost, searches: searches)
+                // v0.28.0：來源只列 Haiku 說支持結論的（舊格式只用引用），不再列全部搜尋結果
+                finishRecheck(cardID, recheckID, reply: reply, sources: RecheckPrompt.sources(all, keep: reply.sources), cost: cost, searches: searches)
                 return
             }
         }
@@ -768,28 +801,228 @@ final class LiveReviewer {
         }
     }
 
-    /// 回來了：改法只套在圈到的行（old 要在那幾行找得到、unsure 沒講到），改過的記成 web 改動（綠字）
-    private func finishRecheck(_ cardID: Int, _ recheckID: Int, reply: RecheckReply, sources: [RecheckSource], cost: Double, searches: Int) {
-        guard var card = cards.first(where: { $0.id == cardID }), var list = card.rechecks,
-              let k = list.firstIndex(where: { $0.id == recheckID }) else { return }
-        let current = CardLines.build(card, diff: diffs[cardID]).map(\.text)
-        let result = RecheckPrompt.apply(lines: current, selected: list[k].lines, reply: reply)
-        if !result.edits.isEmpty {
-            card.edits = (card.edits ?? []) + result.edits
+    /// v0.28.0：一次重查涉及的卡和圈到的行（每張卡用現在畫面上的行）；卡不見了（批次合併）就跳過
+    private func recheckParts(hostID: Int, item: CardRecheck) -> [RecheckPart] {
+        let refs: [(Int, [Int])] = [(hostID, item.lines)]
+        var parts: [RecheckPart] = []
+        for (id, rows) in refs {
+            guard let card = cards.first(where: { $0.id == id }) else { continue }
+            parts.append(RecheckPart(cardID: id, lines: CardLines.build(card, diff: diffs[id]).map(\.text), selected: rows))
         }
-        list[k].state = .done
-        list[k].note = nil
-        list[k].conclusion = reply.conclusion
-        list[k].why = reply.why
-        list[k].sources = sources
-        list[k].applied = result.applied
-        list[k].unsure = reply.unsure.isEmpty ? nil : reply.unsure
-        list[k].costUSD = cost
-        list[k].searches = searches
-        card.rechecks = list
-        put(card)
+        return parts
+    }
+
+    /// 改動接到各卡的 edits 後面（卡不見了就跳過）
+    private func addEdits(_ byCard: [Int: [CardEdit]]) {
+        for (id, list) in byCard where !list.isEmpty {
+            guard var card = cards.first(where: { $0.id == id }) else { continue }
+            card.edits = (card.edits ?? []) + list
+            put(card)
+        }
+    }
+
+    /// 回來了：改法只套在圈到的行（old 要在那幾行找得到），改過的記成 web 改動（綠字）。
+    /// v0.28.0：沒把握的猜測放 maybe（畫面有「套用」）；不論有沒有改字，都照逐字稿重算涉及的卡的重點（重點和逐字稿不一致時對齊）
+    private func finishRecheck(_ cardID: Int, _ recheckID: Int, reply: RecheckReply, sources: [RecheckSource], cost: Double, searches: Int) {
+        guard let host = cards.first(where: { $0.id == cardID }),
+              let item = (host.rechecks ?? []).first(where: { $0.id == recheckID }) else { return }
+        let parts = recheckParts(hostID: cardID, item: item)
+        let joined = RecheckPrompt.combine(parts)
+        let result = RecheckPrompt.apply(lines: joined.lines, selected: joined.selected, reply: reply)
+        addEdits(RecheckPrompt.split(result.edits, owner: joined.owner))
+        var unsure = reply.unsure
+        if !result.lost.isEmpty {
+            // 猜測的原字在圈起來的行裡找不到：不能套，寫進「沒把握」的字
+            let lost = "可能：" + result.lost.map { $0.old + "→" + $0.new }.joined(separator: "、")
+            unsure = unsure.isEmpty ? lost : unsure + "；" + lost
+        }
+        let finalUnsure = unsure
+        let guesses = result.maybe.map { RecheckMaybe(old: $0.old, new: $0.new) }
+        let applied = result.applied
+        updateRecheck(cardID, recheckID) { entry in
+            entry.state = .done
+            entry.note = nil
+            entry.conclusion = reply.conclusion
+            entry.why = reply.why
+            entry.sources = sources
+            entry.applied = applied
+            entry.maybe = guesses.isEmpty ? nil : guesses
+            entry.unsure = finalUnsure.isEmpty ? nil : finalUnsure
+            entry.costUSD = cost
+            entry.searches = searches
+        }
         save()
-        onEvent("重查完：第 \(cardID) 張卡改 \(result.applied.count) 處、搜尋 \(searches) 次、" + String(format: "%.4f 美元", cost))
+        onEvent("重查完：第 \(cardID) 張卡改 \(applied.count) 處、待確認 \(guesses.count) 處、搜尋 \(searches) 次、" + String(format: "%.4f 美元", cost))
+        for part in parts {
+            scheduleRefresh(part.cardID)
+        }
+    }
+
+    /// v0.28.0 按「套用」（錄音中）：一個沒把握的猜測套進圈起來的行（記成 web 改動、綠字），標成已套用，再重算涉及的卡的重點
+    func applyMaybe(cardID: Int, recheckID: Int, index: Int) {
+        guard !closed, !wrapped, let host = cards.first(where: { $0.id == cardID }),
+              let item = (host.rechecks ?? []).first(where: { $0.id == recheckID }) else { return }
+        let list = item.maybe ?? []
+        guard index >= 0, index < list.count, list[index].applied != true else { return }
+        let guess = RecheckFix(old: list[index].old, new: list[index].new)
+        let byCard = RecheckPrompt.applyMaybe(guess, parts: recheckParts(hostID: cardID, item: item))
+        let ok = byCard.values.contains { !$0.isEmpty }
+        addEdits(byCard)
+        updateRecheck(cardID, recheckID) { entry in
+            var marks = entry.maybe ?? []
+            if index < marks.count {
+                marks[index].applied = ok
+            }
+            entry.maybe = marks
+            if ok {
+                let done = entry.applied ?? []
+                entry.applied = done + [guess]
+            }
+        }
+        save()
+        onEvent(ok ? "重查：第 \(cardID) 張卡按了套用" : "重查：第 \(cardID) 張卡按了套用，那幾行已經找不到原字")
+        if ok {
+            for id in byCard.keys.sorted() {
+                scheduleRefresh(id)
+            }
+        }
+    }
+
+    // MARK: v0.28.0 逐字稿改了之後重算重點、整理版
+
+    /// 排一次重算：只排整理到的卡；停用、收尾了不排。錄音中等最後一次改動後 CardRefresh.delay 秒（再被改就從頭等），停止後馬上送。
+    /// 正在送的時候又被改＝跑完再跑一次。私人課程、沒金鑰、Haiku 關掉時根本沒有這個審稿器，所以不會送。
+    private func scheduleRefresh(_ id: Int) {
+        guard cardMode, !closed, !wrapped, stop == nil,
+              let card = cards.first(where: { $0.id == id }), card.state == .done else { return }
+        if refreshRunning.contains(id) {
+            refreshAgain.insert(id)
+        } else {
+            refreshDue[id] = Date().addingTimeInterval(feeding ? CardRefresh.delay : 0)
+        }
+        refreshing.insert(id)
+    }
+
+    /// 排著的都不送了（保持舊的重點）；正在送的照樣等它回來
+    private func dropRefreshes() {
+        guard !refreshDue.isEmpty || !refreshAgain.isEmpty else { return }
+        refreshDue.removeAll()
+        refreshAgain.removeAll()
+        refreshing = refreshRunning
+    }
+
+    /// 每秒：時間到的重算送出去（沒網路先放著；停用、收尾了就全部放棄）
+    private func sendRefreshes() {
+        guard !refreshDue.isEmpty else { return }
+        if stop != nil || wrapped {
+            dropRefreshes()
+            return
+        }
+        guard online else { return }
+        let now = Date()
+        let ready = refreshDue.filter { $0.value <= now && !refreshRunning.contains($0.key) }.map(\.key).sorted()
+        for id in ready {
+            startRefresh(id)
+        }
+    }
+
+    private func startRefresh(_ id: Int) {
+        refreshDue[id] = nil
+        guard let card = cards.first(where: { $0.id == id }), card.state == .done else {
+            refreshing.remove(id)
+            return
+        }
+        let transcript = CardLines.build(card, diff: diffs[id]).map(\.text).filter { !$0.isEmpty }
+        guard !transcript.isEmpty else {
+            refreshing.remove(id)
+            return
+        }
+        let message = CardRefresh.userMessage(transcript: transcript, notes: CardEdits.promptNotes(card.edits ?? []),
+                                              key: card.key, tidy: card.tidy)
+        let block = CardRefresh.courseBlock(course: course)
+        refreshRunning.insert(id)
+        Task {
+            await self.runRefresh(id, courseBlock: block, message: message)
+            self.refreshRunning.remove(id)
+            self.refreshing.remove(id)
+            if self.refreshAgain.remove(id) != nil {
+                self.scheduleRefresh(id)
+            }
+        }
+    }
+
+    /// 送一次重算（不帶網路搜尋）。網路錯照 5／15／45 秒最多 3 次（停止後沒網路就不等）；失敗就保持舊的重點和整理版。
+    /// 4xx 不算進卡片的「連續 400」；金鑰無效、沒額度照樣停用這場。花費算進這張卡和這場（含上限）。
+    private func runRefresh(_ id: Int, courseBlock: String, message: String) async {
+        let apiKey = key
+        var attempts = 0
+        while !closed, !wrapped, stop == nil {
+            let outcome = await Task.detached { () -> HaikuOutcome in
+                guard let body = try? CardRefresh.requestBody(courseBlock: courseBlock, userMessage: message) else {
+                    return .failure(message: "請求內容編不出來", offline: false)
+                }
+                return await HaikuClient.send(body: body, key: apiKey, session: HaikuClient.cardSession, timeout: HaikuClient.cardTimeout)
+            }.value
+            guard !closed, !wrapped else { return }
+            switch outcome {
+            case .failure(let text, let offline):
+                if !offline { attempts += 1 }
+                if offline && !feeding {
+                    onEvent("重點更新：停止後沒有網路，第 \(id) 張卡保持舊的")
+                    return
+                }
+                guard case .retry(let after) = ReviewRetry.afterNetworkError(offline: offline, attempts: attempts) else {
+                    onEvent("重點更新沒成功：\(text)（第 \(id) 張卡保持舊的）")
+                    return
+                }
+                try? await Task.sleep(for: .seconds(after))
+            case .response(let data, let status, _, let retryAfter):
+                attempts += 1
+                let step = ReviewRetry.after(status: status, attempts: attempts, retryAfter: retryAfter)
+                if case .retry(let after) = step {
+                    try? await Task.sleep(for: .seconds(after))
+                    continue
+                }
+                guard step == .parse else {
+                    if case .stop(let reason) = step {
+                        setStop(reason)
+                    }
+                    onEvent("重點更新沒成功：" + HaikuClient.errorText(data, status: status) + "（第 \(id) 張卡保持舊的）")
+                    return
+                }
+                let result = await Task.detached { CardRefresh.parseResponse(data) }.value
+                guard !closed, !wrapped else { return }
+                if let usage = result.usage {
+                    addRecheckCost(id, usd: Cost.usd(usage))
+                }
+                switch result {
+                case .reply(let reply, _):
+                    applyRefresh(id, reply: reply)
+                    return
+                case .unreadable(let reason, _):
+                    if attempts < 2 { continue }
+                    onEvent("重點更新：回覆解析失敗（\(reason)），第 \(id) 張卡保持舊的")
+                    return
+                case .refusal:
+                    onEvent("重點更新：Haiku 拒絕，第 \(id) 張卡保持舊的")
+                    return
+                case .truncated:
+                    onEvent("重點更新：回覆超過長度上限，第 \(id) 張卡保持舊的")
+                    return
+                }
+            }
+        }
+    }
+
+    /// 重算回來：只換這張卡的重點和整理版（卡片重新找一次，不蓋掉等的時候新加的改字、重查）
+    private func applyRefresh(_ id: Int, reply: CardRefreshReply) {
+        guard let i = cards.firstIndex(where: { $0.id == id }), cards[i].state == .done else { return }
+        cards[i].key = reply.key
+        if !reply.tidy.isEmpty {
+            cards[i].tidy = reply.tidy
+        }
+        save()
+        onEvent("重點更新：第 \(id) 張卡照改好的逐字稿重寫了重點和整理版")
     }
 
     /// v0.27.0 討論會停止後分人：這一段的卡（依時間）每行配上時間（用這張卡那批的單位），沒進卡的字當最後一組
@@ -879,18 +1112,31 @@ final class LiveReviewer {
     func stopFeeding() {
         _ = audioNow()
         feeding = false
+        // v0.28.0：排著的重點重算不用再等去抖動，馬上送（收尾前跑完）
+        let now = Date()
+        for id in Array(refreshDue.keys) {
+            refreshDue[id] = now
+        }
         kick()
     }
 
     /// 補送：最多等 seconds 秒（牆上時間）。回傳沒送完的批數。
+    /// v0.28.0：也等重點重算跑完；停止時沒網路就不等重算（保持舊的）。期限到了就收尾，之後晚回來的重算、重查都不套。
     func flush(seconds: Double) async -> Int {
         stopFeeding()
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline, !closed {
             tick()
-            if !inFlight, rechecksInFlight == 0, stop != nil || (pendingCount == 0 && splitter.unsent.isEmpty) { break }
+            if !online {
+                dropRefreshes()
+            }
+            let refreshIdle = refreshDue.isEmpty && refreshRunning.isEmpty
+            if !inFlight, rechecksInFlight == 0, refreshIdle, stop != nil || (pendingCount == 0 && splitter.unsent.isEmpty) { break }
             try? await Task.sleep(for: .milliseconds(250))
         }
+        wrapped = true
+        dropRefreshes()
+        refreshing.removeAll()
         finalizeCards()
         countPromoted()
         await saving?.value

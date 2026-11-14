@@ -164,6 +164,7 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
                           unsure: "很重要那句不確定")
     let applied = RecheckPrompt.apply(lines: rows, selected: [1, 0, 0], reply: r1)
     check(applied.lines.joined(separator: "/"), "今天講連鎖法則。/練習很重要。/第三行練習。", "重查套用：只改圈到的行、沒把握講到的不改")
+    check(applied.maybe.map { $0.old + ">" + $0.new }.joined(separator: ","), "很重要>很要緊", "重查套用：v0.28.0 沒把握講到的改法不丟掉，變成可以按套用的猜測")
     check(applied.applied.map { $0.old + ">" + $0.new }.joined(separator: ","), "練習法則>連鎖法則", "重查套用：真的套上的")
     check(applied.edits.map { "\($0.line):\($0.before)>\($0.after):\($0.by)" }.joined(separator: ","), "0:今天講練習法則。>今天講連鎖法則。:web", "重查套用：記成 web 改動")
     let r2 = RecheckReply(conclusion: "", why: "", fixes: [RecheckFix(old: "練習", new: "連鎖")], unsure: "")
@@ -220,10 +221,16 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
         check("\(parsed.stopReason ?? "nil")|\(parsed.searches)|\(parsed.usage?.input_tokens ?? -1)|\(parsed.content.count)", "end_turn|2|1000|6", "重查回應：停止原因、搜尋次數、用量、區塊原樣留著")
         check(text.hasPrefix("查到了。教科書寫連鎖法則。") ? "接起來" : text, "接起來", "重查回應：文字區塊接起來")
         check(RecheckReply.parse(text)?.conclusion ?? "讀不出", "改成連鎖法則", "重查回應：被引用切開的文字照樣讀到 JSON")
-        check(RecheckPrompt.sources(parsed.content).map { $0.title + "=" + $0.url }.joined(separator: ","), "乙網頁=https://example.com/b", "重查來源：先用引用、去重複")
+        check(RecheckPrompt.sources(parsed.content, keep: nil).map { $0.title + "=" + $0.url }.joined(separator: ","), "乙網頁=https://example.com/b", "重查來源：舊格式用引用、去重複")
         let uncited = parsed.content.filter { (($0 as? [String: Any])?["citations"]) == nil }
-        check(RecheckPrompt.sources(uncited).map { $0.title + "=" + $0.url }.joined(separator: ","),
-              "甲網頁=https://example.com/a,https://example.com/b=https://example.com/b", "重查來源：沒有引用用搜尋結果、只收 http(s)、沒標題用網址")
+        check(RecheckPrompt.sources(uncited, keep: nil).map { $0.title + "=" + $0.url }.joined(separator: ","),
+              "", "重查來源：v0.28.0 沒有引用、也沒有 sources 欄就不列（不再列全部搜尋結果）")
+        check(RecheckPrompt.sources(parsed.content, keep: ["https://EXAMPLE.com/a/"]).map { $0.title + "=" + $0.url }.joined(separator: ","),
+              "甲網頁=https://example.com/a", "重查來源：只留 sources 欄說的網址（大小寫、結尾斜線不管）")
+        check(RecheckPrompt.sources(parsed.content, keep: ["https://example.com/b"]).map { $0.title + "=" + $0.url }.joined(separator: ","),
+              "乙網頁=https://example.com/b", "重查來源：引用和搜尋結果同一個網址只列一次（用引用的標題）")
+        check("\(RecheckPrompt.sources(parsed.content, keep: []).count)|\(RecheckPrompt.sources(parsed.content, keep: ["https://example.com/made-up"]).count)",
+              "0|0", "重查來源：sources 空的＝不列；沒搜到的網址不列")
         check(String(format: "%.4f", RecheckPrompt.cost(usage: parsed.usage, searches: parsed.searches)), "0.0202", "重查花費：token＋每次搜尋 0.01 美元")
         check(RecheckPrompt.searchError(parsed.content) ?? "沒有", "沒有", "重查回應：搜尋沒出錯")
     } else {
@@ -231,7 +238,7 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
     }
     let errorJSON = #"{"content": [{"type": "web_search_tool_result", "tool_use_id": "s", "content": {"type": "web_search_tool_result_error", "error_code": "max_uses_exceeded"}}], "stop_reason": "pause_turn", "usage": {"input_tokens": 10, "output_tokens": 1}}"#
     if let parsed = RecheckPrompt.parse(Data(errorJSON.utf8)) {
-        check("\(parsed.stopReason ?? "nil")|\(parsed.searches)|\(RecheckPrompt.searchError(parsed.content) ?? "沒有")|\(RecheckPrompt.sources(parsed.content).count)",
+        check("\(parsed.stopReason ?? "nil")|\(parsed.searches)|\(RecheckPrompt.searchError(parsed.content) ?? "沒有")|\(RecheckPrompt.sources(parsed.content, keep: nil).count)",
               "pause_turn|0|max_uses_exceeded|0", "重查回應：搜尋出錯是物件、沒有 server_tool_use 算 0 次")
     } else {
         check("解析不了", "解析得了", "重查回應：出錯也解析得了")
@@ -254,4 +261,130 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
     check(gap.text, "A：甲。", "分人：沒重疊用最近的那段（第一個出現的叫 A）")
     let none = CardSpeakers.label([[sl("甲。", 10, 12), sl("乙。", 12, 14)], [sl("  ", 14, 15)]], turns: [])
     check(none.text + "|" + "\(none.names.count)", "甲。乙。|0", "分人：沒有講者段落不標")
+
+    v28Tests(check)
+}
+
+// v0.28.0：重算重點、重查的猜測（maybe）與來源、跨卡的行對應、舊 JSON 相容。例子全是編的。
+private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
+    // ---- 只有說明的改動不算改字；要不要重算
+    let noteOnly = [CardEdit(line: 0, before: "甲句。", after: "甲句。", by: CardEdit.user, note: "這段是自我介紹")]
+    let blankNote = [CardEdit(line: 0, before: "甲句。", after: "甲句。", by: CardEdit.user, note: "  ")]
+    let realEdit = [CardEdit(line: 0, before: "甲句。", after: "乙句。", by: CardEdit.user)]
+    check("\(CardEdits.changesText(noteOnly))|\(CardEdits.changesText(realEdit))|\(CardEdits.changesText(nil))", "false|true|false",
+          "改字：只寫說明的那筆不算改過字")
+    check("\(CardEdits.needsRefresh(noteOnly))|\(CardEdits.needsRefresh(blankNote))|\(CardEdits.needsRefresh(realEdit))|\(CardEdits.needsRefresh([]))",
+          "true|false|true|false", "重算：改了字或寫了說明才重算，空白說明不算")
+
+    // ---- 重算重點：回覆解析
+    func refreshed(_ text: String) -> String {
+        guard let r = CardRefreshReply.parse(text) else { return "讀不出" }
+        return r.key + "|" + r.tidy
+    }
+    check(refreshed(#"{"key": "報告的人不是甲", "tidy": "講者說今天報告的不是甲。"}"#), "報告的人不是甲|講者說今天報告的不是甲。", "重算回覆：一般")
+    check(refreshed("好的：\n```json\n{\"key\": \" 連鎖法則 \", \"tidy\": \"\"}\n```"), "連鎖法則|", "重算回覆：前後有字、去空白、整理版可以空")
+    check(refreshed(#"{"key": "", "tidy": "有字"}"#), "讀不出", "重算回覆：重點空的不算")
+    check(refreshed("沒有 JSON"), "讀不出", "重算回覆：沒有 JSON")
+    let okResponse = #"{"content": [{"type": "text", "text": "{\"key\": \"解析幾何的向量\", \"tidy\": \"講者介紹向量。\"}"}], "stop_reason": "end_turn", "usage": {"input_tokens": 1200, "output_tokens": 100}}"#
+    if case .reply(let r, let usage) = CardRefresh.parseResponse(Data(okResponse.utf8)) {
+        check(r.key + "|" + r.tidy + "|" + String(format: "%.5f", usage.map(Cost.usd) ?? -1), "解析幾何的向量|講者介紹向量。|0.00017",
+              "重算回應：解出重點、整理版、花費")
+    } else {
+        check("沒解出", "解出", "重算回應：解析")
+    }
+    let cutResponse = #"{"content": [], "stop_reason": "max_tokens", "usage": {"input_tokens": 1, "output_tokens": 1}}"#
+    if case .truncated = CardRefresh.parseResponse(Data(cutResponse.utf8)) {
+        check("超長", "超長", "重算回應：超過長度上限不套")
+    } else {
+        check("不是超長", "超長", "重算回應：超過長度上限不套")
+    }
+    if case .unreadable = CardRefresh.parseResponse(Data("不是 JSON".utf8)) {
+        check("讀不出", "讀不出", "重算回應：不是 JSON")
+    } else {
+        check("讀得出", "讀不出", "重算回應：不是 JSON")
+    }
+
+    // ---- 重算重點：訊息、提示詞、請求
+    let refreshMessage = CardRefresh.userMessage(transcript: ["今天報告的人不是甲。", "是乙。"], notes: ["這堂是解析幾何"], key: "報告的人是甲", tidy: "")
+    let messageOK = refreshMessage.contains("今天報告的人不是甲。\n是乙。") && refreshMessage.contains("這堂是解析幾何")
+        && refreshMessage.contains("報告的人是甲") && refreshMessage.contains("原本的整理版（只參考，和逐字稿不合就改）：（沒有）")
+    check(messageOK ? "對" : refreshMessage, "對", "重算訊息：改好的逐字稿一句一行、說明、原本的重點和整理版")
+    check(CardRefresh.userMessage(transcript: ["甲。"], notes: [], key: "", tidy: "").contains("使用者的說明") ? "有" : "沒有", "沒有", "重算訊息：沒說明就沒有說明段")
+    check(["逐字稿是準的", "不得和逐字稿矛盾", "不要一律寫「老師」", "（這段聽不清）", "（現場口令）", "15 字內", "以課名為準", "不能上網查"]
+            .filter { !CardRefresh.system.contains($0) }.joined(separator: "、"), "", "重算提示詞：逐字稿為準、不得矛盾、其餘規則和卡片一樣")
+    check(CardRefresh.courseBlock(course: "") + "/" + CardRefresh.courseBlock(course: "解析幾何"), "課名：（討論會，沒有課名）/課名：解析幾何", "重算課名：沒課名寫討論會")
+    if let body = try? CardRefresh.requestBody(courseBlock: "課名：解析幾何", userMessage: "稿"),
+       let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] {
+        let config = object["output_config"] as? [String: Any] ?? [:]
+        let format = config["format"] as? [String: Any] ?? [:]
+        check("\(object["model"] ?? "")|\(object["max_tokens"] ?? "")|\(object["tools"] == nil)|\(format["type"] ?? "")",
+              "claude-haiku-5-5|1500|true|json_schema", "重算請求：Haiku、不帶網路搜尋、結構化輸出")
+    } else {
+        check("編不出來", "編得出來", "重算請求：編得出來")
+    }
+
+    // ---- 重查：maybe、sources 的解析
+    let guessReply = RecheckReply.parse(#"{"conclusion": "很可能是乙博士", "why": "查到同名的人", "fixes": [], "maybe": [{"old": "甲伯士", "new": "乙博士"}, {"old": "", "new": "空"}], "unsure": "不確定是不是同一人", "sources": ["https://example.com/a", {"url": "https://example.com/b"}, 3]}"#)
+    check(guessReply.map { $0.maybe.map { $0.old + ">" + $0.new }.joined(separator: ",") + "|" + ($0.sources ?? ["nil"]).joined(separator: ",") } ?? "讀不出",
+          "甲伯士>乙博士|https://example.com/a,https://example.com/b", "重查回覆：maybe（old 空的不算）、sources（字串或 url 物件）")
+    let oldStyle = RecheckReply.parse(#"{"conclusion": "改成連鎖法則", "why": "", "fixes": [{"old": "練習法則", "new": "連鎖法則"}], "unsure": ""}"#)
+    check(oldStyle.map { "\($0.maybe.count)|" + ($0.sources == nil ? "nil" : "有") } ?? "讀不出", "0|nil", "重查回覆：舊格式沒有 maybe、sources 照讀")
+    check(RecheckPrompt.userMessage(course: "解析幾何", key: "（這段聽不清）", lines: ["甲"]).contains("這段的重點：（還沒有）") ? "對" : "不對", "對",
+          "重查訊息：固定字樣的重點當沒有重點")
+    check(["一定要放進 fixes", "放進 maybe", "只放真的支持結論的網址"].filter { !RecheckPrompt.system.contains($0) }.joined(separator: "、"), "",
+          "重查提示詞：該改的一定放 fixes、猜測放 maybe、來源只列支持結論的")
+
+    // ---- 重查：猜測（maybe）的整理
+    let guessRows = ["今天請到甲伯士來演講。", "他以前是院長。", "沒圈的丙字。"]
+    let guessFixes = RecheckReply(conclusion: "", why: "", fixes: [RecheckFix(old: "院長", new: "前院長")], unsure: "院長的年份查不到",
+                                  maybe: [RecheckFix(old: "甲伯士", new: "乙博士"), RecheckFix(old: "丙字", new: "丁字"), RecheckFix(old: "甲伯士", new: "乙博士")])
+    let guessed = RecheckPrompt.apply(lines: guessRows, selected: [0, 1], reply: guessFixes)
+    check(guessed.lines.joined(separator: "/") + "#" + guessed.maybe.map { $0.old + ">" + $0.new }.joined(separator: ",")
+            + "#" + guessed.lost.map { $0.old + ">" + $0.new }.joined(separator: ","),
+          "今天請到甲伯士來演講。/他以前是院長。/沒圈的丙字。#院長>前院長,甲伯士>乙博士#丙字>丁字",
+          "重查套用：沒把握講到的改法變猜測、猜測只留圈到的行找得到的、去重複")
+    let both = RecheckPrompt.apply(lines: guessRows, selected: [0], reply: RecheckReply(conclusion: "", why: "", fixes: [RecheckFix(old: "甲伯士", new: "乙博士")],
+                                                                                       unsure: "", maybe: [RecheckFix(old: "甲伯士", new: "丙博士")]))
+    check("\(both.applied.count)|\(both.maybe.count)|\(both.lost.count)", "1|0|0", "重查套用：已經套上的同一處不再列猜測")
+
+    // ---- 跨卡：行接起來、改動對回各卡
+    let parts = [RecheckPart(cardID: 3, lines: ["甲卡一。", "甲卡二講到乙博", "甲卡三。"], selected: [2, 1, 1]),
+                 RecheckPart(cardID: 4, lines: ["士的事。", "乙卡二。"], selected: [0, 5])]
+    let joined = RecheckPrompt.combine(parts)
+    check("\(joined.selected)|" + joined.owner.map { "\($0.card).\($0.line)" }.joined(separator: ","), "[1, 2, 3]|3.0,3.1,3.2,4.0,4.1",
+          "跨卡：行照卡的順序接起來、圈到的行換成接起來的行號（重複、超出的不算）")
+    let joinedEdits = [CardEdit(line: 3, before: "士的事。", after: "士的事情。", by: CardEdit.web),
+                       CardEdit(line: 1, before: "甲卡二講到乙博", after: "甲卡二講到丙博", by: CardEdit.web),
+                       CardEdit(line: 9, before: "多的", after: "多的字", by: CardEdit.web)]
+    let split = RecheckPrompt.split(joinedEdits, owner: joined.owner)
+    let splitText = split.keys.sorted().map { (k: Int) -> String in
+        "\(k):" + (split[k] ?? []).map { "\($0.line)=\($0.after)" }.joined(separator: ",")
+    }.joined(separator: " ")
+    check(splitText, "3:1=甲卡二講到丙博 4:0=士的事情。", "跨卡：改動的行號對回各卡自己的行號、對不到的丟掉")
+    let crossReply = RecheckReply(conclusion: "", why: "", fixes: [RecheckFix(old: "乙卡二", new: "丙卡二"), RecheckFix(old: "甲卡三", new: "丁卡三")], unsure: "")
+    let crossApplied = RecheckPrompt.apply(lines: joined.lines, selected: joined.selected, reply: crossReply)
+    let crossSplit = RecheckPrompt.split(crossApplied.edits, owner: joined.owner)
+    check(crossSplit.keys.sorted().map { "\($0)" }.joined(separator: ",") + "|" + ((crossSplit[3] ?? []).first.map { "\($0.line):\($0.after)" } ?? "沒有"),
+          "3|2:丁卡三。", "跨卡：只改圈到的行（第二張卡沒圈的那行不改）")
+
+    // ---- 按「套用」
+    let tapped = RecheckPrompt.applyMaybe(RecheckFix(old: "乙卡二", new: "丙卡二"),
+                                          parts: [RecheckPart(cardID: 3, lines: ["甲卡一。"], selected: [0]), RecheckPart(cardID: 4, lines: ["士的事。", "乙卡二。"], selected: [1])])
+    check(tapped.keys.sorted().map { "\($0)" }.joined(separator: ",") + "|" + ((tapped[4] ?? []).first.map { "\($0.line):\($0.before)>\($0.after):\($0.by)" } ?? "沒有"),
+          "4|1:乙卡二。>丙卡二。:web", "套用猜測：套在那張卡那一行、記成 web 改動（綠字）")
+    check(RecheckPrompt.applyMaybe(RecheckFix(old: "找不到", new: "別的"), parts: parts).isEmpty ? "空" : "有", "空", "套用猜測：原字已經找不到＝不改")
+
+    // ---- 舊 JSON 相容、新欄位存得進去
+    let oldRecheck = #"{"id": 2, "lines": [0], "asked": "甲句", "state": "done", "conclusion": "不用改"}"#
+    let decodedRecheck = try? JSONDecoder().decode(CardRecheck.self, from: Data(oldRecheck.utf8))
+    check(decodedRecheck.map { "\($0.id)|\($0.conclusion ?? "")|" + ($0.maybe == nil ? "nil" : "有") } ?? "讀不進來", "2|不用改|nil",
+          "舊卡片.json：重查沒有 maybe 照讀")
+    let oldCard = #"{"id": 9, "start": 0, "end": 60, "raw": "甲句。", "state": "done", "key": "甲", "tidy": "甲。", "unsure": [], "expanded": "甲句。", "costUSD": 0, "rechecks": [{"id": 1, "lines": [0], "asked": "甲句。", "state": "done"}]}"#
+    let decodedCard = try? JSONDecoder().decode(LiveCard.self, from: Data(oldCard.utf8))
+    check(decodedCard.map { "\($0.id)|\($0.key)|\($0.rechecks?.count ?? -1)|" + ($0.rechecks?.first?.maybe == nil ? "nil" : "有") } ?? "讀不進來", "9|甲|1|nil",
+          "舊卡片.json：整張卡照讀")
+    var item = CardRecheck(id: 5, lines: [1], asked: "乙句")
+    item.maybe = [RecheckMaybe(old: "甲", new: "乙", applied: true), RecheckMaybe(old: "丙", new: "丁")]
+    let reread = (try? JSONEncoder().encode(item)).flatMap { try? JSONDecoder().decode(CardRecheck.self, from: $0) }
+    check(reread == item ? "一樣" : "不一樣", "一樣", "卡片.json：猜測和已套用存得進去也讀得回來")
 }

@@ -89,9 +89,24 @@ struct CardEdit: Codable, Equatable {
 
     static let user = "user"
     static let web = "web"
+
+    /// v0.28.0：真的改了字（before≠after）。只寫說明的那筆＝false
+    var changesText: Bool { before != after }
+    /// v0.28.0：有寫說明（去掉空白後不是空的）
+    var hasNote: Bool { !(note ?? "").trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 }
 
 enum CardEdits {
+    /// v0.28.0：這些改動裡有沒有真的改字（只寫說明的不算）
+    static func changesText(_ edits: [CardEdit]?) -> Bool {
+        (edits ?? []).contains { $0.changesText }
+    }
+
+    /// v0.28.0：要不要照逐字稿重算重點和整理版（有改字或有說明）
+    static func needsRefresh(_ edits: [CardEdit]?) -> Bool {
+        (edits ?? []).contains { $0.changesText || $0.hasNote }
+    }
+
     /// 兩段字共同的頭尾去掉，剩下中間換掉的那段（old→new）。完全一樣＝兩個都空。
     static func fragment(_ before: String, _ after: String) -> (prefix: String, old: String, new: String, suffix: String) {
         let a = Array(before), b = Array(after)
@@ -339,6 +354,26 @@ struct RecheckFix: Codable, Equatable {
     var new: String
 }
 
+/// v0.28.0 重查沒把握、但有具體猜測的改法（畫面上一顆「套用」）。applied：nil＝還沒按；true＝套上了；false＝按了但那幾行已經找不到原字
+struct RecheckMaybe: Codable, Equatable {
+    var old: String
+    var new: String
+    var applied: Bool? = nil
+}
+
+/// v0.28.0 跨卡重查用：哪張卡的第幾行
+struct CardLineRef: Hashable {
+    var card: Int
+    var line: Int
+}
+
+/// v0.28.0 一次重查裡一張卡的部分：這張卡現在畫面上的全部行、圈到其中哪幾行
+struct RecheckPart: Equatable {
+    var cardID: Int
+    var lines: [String]
+    var selected: [Int]
+}
+
 /// 一次重查（存在卡片.json）。lines＝圈到的行；asked＝送出去的那幾行字。
 struct CardRecheck: Codable, Equatable, Identifiable {
     enum State: String, Codable {
@@ -359,6 +394,8 @@ struct CardRecheck: Codable, Equatable, Identifiable {
     var note: String? = nil
     var costUSD: Double? = nil
     var searches: Int? = nil
+    /// v0.28.0：沒把握的猜測（可以按「套用」）。舊的卡片.json 沒有這欄＝nil
+    var maybe: [RecheckMaybe]? = nil
 }
 
 /// 重查回覆最後那個 JSON
@@ -367,6 +404,10 @@ struct RecheckReply: Equatable {
     var why: String
     var fixes: [RecheckFix]
     var unsure: String
+    /// v0.28.0：沒把握但有具體猜測的
+    var maybe: [RecheckFix] = []
+    /// v0.28.0：Haiku 說真的支持結論的網址；nil＝回覆沒有這欄（舊格式）
+    var sources: [String]? = nil
 
     /// 從全部文字裡找最後一個讀得出來、有 conclusion 或 fixes 的 JSON 物件（前面可以有說明字、```json）
     static func parse(_ text: String) -> RecheckReply? {
@@ -420,15 +461,28 @@ struct RecheckReply: Equatable {
         return ""
     }
 
-    private static func make(_ object: [String: Any]) -> RecheckReply {
-        let list = object["fixes"] as? [Any] ?? []
-        let fixes = list.compactMap { item -> RecheckFix? in
+    private static func pairs(_ value: Any?) -> [RecheckFix] {
+        let list = value as? [Any] ?? []
+        return list.compactMap { item -> RecheckFix? in
             guard let fix = item as? [String: Any] else { return nil }
             let old = string(fix["old"]), new = string(fix["new"])
             return old.isEmpty ? nil : RecheckFix(old: old, new: new)
         }
-        return RecheckReply(conclusion: string(object["conclusion"]), why: string(object["why"]), fixes: fixes,
-                            unsure: string(object["unsure"]))
+    }
+
+    /// sources：網址字串的清單（也收 {"url": …}）；沒有這欄＝nil
+    private static func urls(_ value: Any?) -> [String]? {
+        guard let list = value as? [Any] else { return nil }
+        return list.compactMap { item -> String? in
+            if let s = item as? String { return s.trimmingCharacters(in: .whitespacesAndNewlines) }
+            if let d = item as? [String: Any], let s = d["url"] as? String { return s.trimmingCharacters(in: .whitespacesAndNewlines) }
+            return nil
+        }.filter { !$0.isEmpty }
+    }
+
+    private static func make(_ object: [String: Any]) -> RecheckReply {
+        RecheckReply(conclusion: string(object["conclusion"]), why: string(object["why"]), fixes: pairs(object["fixes"]),
+                     unsure: string(object["unsure"]), maybe: pairs(object["maybe"]), sources: urls(object["sources"]))
     }
 }
 
@@ -450,8 +504,13 @@ enum RecheckPrompt {
     你幫忙核對錄音逐字稿裡可能聽錯的字。使用者用筆圈起幾行 Whisper 逐字稿（語音辨識，常把專有名詞、術語、數字聽成同音字）。
     請用網路搜尋查證圈起來那幾行裡可疑的詞，判斷原本講的應該是什麼。只看圈起來的行，不要改寫句子、不要摘要。
     回答用繁體中文（台灣用語），最後一定要附一個 JSON 物件（整個回答只放這一個，放在最後）：
-    {"conclusion": "一句話：這幾行該改成什麼（不用改就說不用改）", "why": "一句話說為什麼", "fixes": [{"old": "逐字稿裡原本的字，要和圈起來的行逐字一樣", "new": "改成的字"}], "unsure": "沒把握的地方；都有把握就空字串"}
-    fixes 只放有把握的改法，old 要短（只放聽錯的那個詞），一定要在圈起來的行裡找得到；沒把握的不要放進 fixes，寫在 unsure。
+    {"conclusion": "一句話：這幾行該改成什麼（不用改就說不用改）", "why": "一句話說為什麼", "fixes": [{"old": "逐字稿裡原本的字，要和圈起來的行逐字一樣", "new": "改成的字"}], "maybe": [{"old": "逐字稿裡原本的字", "new": "猜測的字"}], "unsure": "沒把握的原因；沒有就空字串", "sources": ["真的支持結論的網址"]}
+    規則：
+    - 結論說要改的每一處，都一定要放進 fixes，不能只寫在 conclusion 或 why。
+    - 沒把握、但有具體猜測（例如「很可能是某某」）的，放進 maybe，不要放進 fixes，也不要只寫在 unsure。
+    - fixes 和 maybe 的 old 要短（只放聽錯的那個詞），一定要在圈起來的行裡逐字找得到；同一處只放其中一邊。
+    - unsure 只寫文字說明（哪裡查不到、為什麼沒把握），不要在這裡放改法。
+    - sources 只放真的支持結論的網址；沒有就給空陣列。和結論無關的搜尋結果不要列。
     """
 
     static func webSearchTool() -> [String: Any] {
@@ -464,9 +523,10 @@ enum RecheckPrompt {
     }
 
     /// 使用者訊息：課名（沒有就寫討論會）、這張卡的重點、圈起來的行（不送整份逐字稿）
+    /// v0.28.0：重點是固定字樣（聽不清、現場口令）也當沒有重點
     static func userMessage(course: String, key: String, lines: [String]) -> String {
         let name = course.isEmpty ? "（討論會，沒有課名）" : course
-        let point = key.isEmpty ? "（還沒有）" : key
+        let point = key.isEmpty || CardText.isPlaceholderKey(key) ? "（還沒有）" : key
         return "課名：\(name)\n這段的重點：\(point)\n\n圈起來的逐字稿（一行一句）：\n" + lines.joined(separator: "\n")
     }
 
@@ -510,8 +570,17 @@ enum RecheckPrompt {
             .compactMap { $0["text"] as? String }.joined()
     }
 
-    /// 來源：先用文字裡的引用（web_search_result_location），沒有再用搜尋結果；只收 http(s)、去重複、最多 limit 個
-    static func sources(_ content: [Any], limit: Int = 5) -> [RecheckSource] {
+    /// 比對網址用：小寫、去掉最後的 /
+    static func urlKey(_ url: String) -> String {
+        var s = url.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        while s.hasSuffix("/") { s.removeLast() }
+        return s
+    }
+
+    /// v0.28.0 來源：keep＝回覆 JSON 的 sources（Haiku 說支持結論的網址）。
+    /// 有 keep：只留引用或搜尋結果裡、網址在 keep 的（空陣列＝不列；編出來、沒搜到的網址不列）；
+    /// 沒有 keep（舊格式）：只用文字裡的引用，不再把全部搜尋結果都列上去（以前會列到和內容無關的網頁）。
+    static func sources(_ content: [Any], keep: [String]?, limit: Int = 5) -> [RecheckSource] {
         let blocks = content.compactMap { $0 as? [String: Any] }
         var cited: [RecheckSource] = []
         for block in blocks where (block["type"] as? String) == "text" {
@@ -532,12 +601,18 @@ enum RecheckPrompt {
                 }
             }
         }
+        var pool = cited
+        if let keep {
+            let wanted = Set(keep.map(urlKey))
+            pool = (cited + found).filter { wanted.contains(urlKey($0.url)) }
+        }
         var seen = Set<String>()
         var out: [RecheckSource] = []
-        for source in (cited.isEmpty ? found : cited) {
+        for source in pool {
             let lower = source.url.lowercased()
-            guard lower.hasPrefix("https://") || lower.hasPrefix("http://"), !seen.contains(source.url) else { continue }
-            seen.insert(source.url)
+            let k = urlKey(source.url)
+            guard lower.hasPrefix("https://") || lower.hasPrefix("http://"), !seen.contains(k) else { continue }
+            seen.insert(k)
             let title = source.title.trimmingCharacters(in: .whitespacesAndNewlines)
             out.append(RecheckSource(title: title.isEmpty ? source.url : title, url: source.url))
             if out.count >= limit { break }
@@ -560,18 +635,24 @@ enum RecheckPrompt {
         (usage.map(Cost.usd) ?? 0) + Double(searches) * searchUSD
     }
 
-    /// 把改法套進圈起來的行：old 要在圈起來的行裡找得到（依行序找第一行、換第一處）；unsure 講到的字不套。
-    /// 回傳改好的行、要記進卡片的改動、真的套上的改法。
-    static func apply(lines: [String], selected: [Int], reply: RecheckReply) -> (lines: [String], edits: [CardEdit], applied: [RecheckFix]) {
+    /// 把改法套進圈起來的行：old 要在圈起來的行裡找得到（依行序找第一行、換第一處）。
+    /// v0.28.0：unsure 講到的改法不再丟掉，改放進 maybe（畫面上有「套用」）；回覆的 maybe 只留 old 在圈起來的行裡找得到的，
+    /// 找不到的放 lost（畫面寫進「沒把握」的字）。回傳改好的行、要記進卡片的改動、真的套上的改法、可以按套用的猜測、找不到的猜測。
+    static func apply(lines: [String], selected: [Int], reply: RecheckReply)
+        -> (lines: [String], edits: [CardEdit], applied: [RecheckFix], maybe: [RecheckFix], lost: [RecheckFix]) {
         var out = lines
         var edits: [CardEdit] = []
         var applied: [RecheckFix] = []
+        var guesses: [RecheckFix] = []
         let unsure = reply.unsure
         let rows = Array(Set(selected)).sorted().filter { $0 >= 0 && $0 < out.count }
         for fix in reply.fixes {
             let old = fix.old, new = fix.new
             guard !old.isEmpty, old != new else { continue }
-            if !unsure.isEmpty, unsure.contains(old) || (!new.isEmpty && unsure.contains(new)) { continue }
+            if !unsure.isEmpty, unsure.contains(old) || (!new.isEmpty && unsure.contains(new)) {
+                guesses.append(fix)
+                continue
+            }
             guard let row = rows.first(where: { out[$0].contains(old) }), let range = out[row].range(of: old) else { continue }
             let before = out[row]
             let after = before.replacingCharacters(in: range, with: new)
@@ -579,7 +660,150 @@ enum RecheckPrompt {
             edits.append(CardEdit(line: row, before: before, after: after, by: CardEdit.web))
             applied.append(fix)
         }
-        return (out, edits, applied)
+        var maybe: [RecheckFix] = []
+        var lost: [RecheckFix] = []
+        for fix in guesses + reply.maybe {
+            guard !fix.old.isEmpty, fix.old != fix.new else { continue }
+            // 同一處已經套上、或已經列過的不重複
+            if applied.contains(where: { $0.old == fix.old }) || maybe.contains(fix) || lost.contains(fix) { continue }
+            if rows.contains(where: { out[$0].contains(fix.old) }) {
+                maybe.append(fix)
+            } else {
+                lost.append(fix)
+            }
+        }
+        return (out, edits, applied, maybe, lost)
+    }
+
+    /// v0.28.0 跨卡：各卡的行接成一份（卡的順序照 parts），圈到的行換成接起來之後的行號；owner[i]＝接起來第 i 行原本是哪張卡第幾行
+    static func combine(_ parts: [RecheckPart]) -> (lines: [String], selected: [Int], owner: [CardLineRef]) {
+        var lines: [String] = []
+        var selected: [Int] = []
+        var owner: [CardLineRef] = []
+        for part in parts {
+            let base = lines.count
+            for row in Array(Set(part.selected)).sorted() where row >= 0 && row < part.lines.count {
+                selected.append(base + row)
+            }
+            for (i, text) in part.lines.enumerated() {
+                lines.append(text)
+                owner.append(CardLineRef(card: part.cardID, line: i))
+            }
+        }
+        return (lines, selected, owner)
+    }
+
+    /// v0.28.0 跨卡：接起來那份的改動，行號換回各卡自己的行號，依卡分開（同一張卡照原本順序）；對不到的丟掉
+    static func split(_ edits: [CardEdit], owner: [CardLineRef]) -> [Int: [CardEdit]] {
+        var out: [Int: [CardEdit]] = [:]
+        for edit in edits where edit.line >= 0 && edit.line < owner.count {
+            let ref = owner[edit.line]
+            var local = edit
+            local.line = ref.line
+            out[ref.card, default: []].append(local)
+        }
+        return out
+    }
+
+    /// v0.28.0 按「套用」：一個猜測套進圈起來的行（和 fixes 同一套找法），回傳要記進各卡的改動（找不到＝空）
+    static func applyMaybe(_ fix: RecheckFix, parts: [RecheckPart]) -> [Int: [CardEdit]] {
+        let joined = combine(parts)
+        let one = RecheckReply(conclusion: "", why: "", fixes: [fix], unsure: "")
+        let result = apply(lines: joined.lines, selected: joined.selected, reply: one)
+        return split(result.edits, owner: joined.owner)
+    }
+}
+
+// MARK: - v0.28.0 逐字稿改了之後重算重點、整理版
+
+/// 重算回覆（JSON）
+struct CardRefreshReply: Equatable {
+    var key: String
+    var tidy: String
+
+    /// 容錯：前後多了說明字或 ```json 也讀（第一個 { 到最後一個 }）；key 空＝不算
+    static func parse(_ text: String) -> CardRefreshReply? {
+        guard let open = text.firstIndex(of: "{"), let close = text.lastIndex(of: "}"), open < close else { return nil }
+        let body = String(text[open...close])
+        guard let object = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] else { return nil }
+        let key = ((object["key"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        let tidy = ((object["tidy"] as? String) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !key.isEmpty else { return nil }
+        return CardRefreshReply(key: key, tidy: tidy)
+    }
+}
+
+/// 重算請求回來的結果。unreadable 的 reason 不含稿的字。
+enum CardRefreshResult: Equatable {
+    case reply(CardRefreshReply, usage: Usage?)
+    case refusal(usage: Usage?)
+    case truncated(usage: Usage?)
+    case unreadable(reason: String, usage: Usage?)
+
+    var usage: Usage? {
+        switch self {
+        case .reply(_, let u), .refusal(let u), .truncated(let u), .unreadable(_, let u): return u
+        }
+    }
+}
+
+/// 一張卡的逐字稿被改（使用者改字、留說明、重查改字、按套用）之後，小的 Haiku 呼叫（不上網）照改好的逐字稿重寫這張卡的重點和整理版。
+/// 只送課名、這張卡改好的逐字稿、這張卡使用者的說明、原本的重點和整理版；不送投影片。
+enum CardRefresh {
+    static let maxTokens = 1500
+    /// 最後一次改動後等幾秒再送（錄音中）；停止後馬上送
+    static let delay = 4.0
+
+    static let system = """
+    你在幫一位學生更新上課筆記的一張卡。這張卡的逐字稿剛被修正過（使用者改了字、或查證後改了字），請照修正後的逐字稿重寫這張卡的重點（key）和整理版（tidy），回一個 JSON：{"key": "…", "tidy": "…"}。
+    逐字稿是準的。重點和整理版不得和逐字稿矛盾：原本的重點、整理版只是參考，和逐字稿不合的地方一律照逐字稿改（例如逐字稿說「不是某某」，就不能寫成「是某某」）。
+    講話的人不一定是老師：可能是學長姐、助教、上台報告的同學或來賓。看不出是誰就寫「講者」或不寫主詞，不要一律寫「老師」。
+    課名是使用者自己選的（寫「沒有課名」就不管）。這堂的主題以課名為準，不要因為稿裡某個詞、或使用者改過的某個字，就改判成別的主題。
+    「使用者的說明」是使用者給你的話：照著做（你這裡不能上網查，查不到就不要假裝查過），但不要把說明的字抄進 key、tidy。
+    tidy：2–4 句通順中文，只寫講者真的講到的。整段聽不清，或只是現場口令（喊口號、拍照、點名）、雜聲，就只寫（這段聽不清）或（現場口令），不要編成像真的內容。只有一部分是這樣：只整理有內容的部分。
+    key：一句重點，15 字內，只寫這段真的講到的內容。整段聽不清，或只是現場口令、雜聲，key 就寫（這段聽不清）或（現場口令），不要從口令或雜聲編出重點。
+    """
+
+    static let schemaText = #"{"type":"object","additionalProperties":false,"required":["key","tidy"],"properties":{"key":{"type":"string"},"tidy":{"type":"string"}}}"#
+
+    /// 放在 system 第二段的課名（很短，不會真的快取）；沒課名寫討論會
+    static func courseBlock(course: String) -> String {
+        "課名：" + (course.isEmpty ? "（討論會，沒有課名）" : course)
+    }
+
+    /// 使用者訊息：改好的逐字稿（一句一行）、使用者的說明（有才放）、原本的重點和整理版（固定字樣照寫，讓它知道原本是聽不清）
+    static func userMessage(transcript: [String], notes: [String], key: String, tidy: String) -> String {
+        var text = "這張卡修正後的逐字稿（一句一行，這是準的）：\n" + transcript.joined(separator: "\n")
+        if !notes.isEmpty {
+            text += "\n\n使用者的說明（照著做，但不要抄進 key、tidy）：\n" + notes.joined(separator: "\n")
+        }
+        text += "\n\n原本的重點（只參考，和逐字稿不合就改）：" + (key.isEmpty ? "（沒有）" : key)
+        text += "\n原本的整理版（只參考，和逐字稿不合就改）：" + (tidy.isEmpty ? "（沒有）" : tidy)
+        return text
+    }
+
+    static func requestBody(courseBlock: String, userMessage: String) throws -> Data {
+        try HaikuPrompt.requestBody(courseBlock: courseBlock, userMessage: userMessage, maxTokens: maxTokens,
+                                    system: system, schemaText: schemaText)
+    }
+
+    /// 先看 stop_reason（refusal、max_tokens 不重送），再從 content 找第一個 type=="text" 的區塊
+    static func parseResponse(_ data: Data) -> CardRefreshResult {
+        guard let response = try? JSONDecoder().decode(HaikuResponse.self, from: data) else {
+            return .unreadable(reason: "回應不是預期的格式", usage: nil)
+        }
+        switch response.stop_reason {
+        case "refusal": return .refusal(usage: response.usage)
+        case "max_tokens": return .truncated(usage: response.usage)
+        default: break
+        }
+        guard let text = response.content?.first(where: { $0.type == "text" })?.text else {
+            return .unreadable(reason: "回應裡沒有文字區塊", usage: response.usage)
+        }
+        guard let reply = CardRefreshReply.parse(text) else {
+            return .unreadable(reason: "文字區塊不是規定的 JSON", usage: response.usage)
+        }
+        return .reply(reply, usage: response.usage)
     }
 }
 

@@ -62,6 +62,10 @@ struct LiveCardsView: View {
                                      },
                                      onCircle: { rows in
                                          review.recheck(cardID: card.id, lines: rows)
+                                     },
+                                     refreshing: review.refreshing.contains(card.id),
+                                     onApplyMaybe: { recheckID, index in
+                                         review.applyMaybe(cardID: card.id, recheckID: recheckID, index: index)
                                      })
                     }
                     // 寬的時候即時字只佔左欄（和逐字稿對齊）
@@ -292,15 +296,26 @@ private struct PencilStrokeModifier: ViewModifier {
     }
 }
 
-/// v0.27.0 右邊重點卡的「重查」：結論 → 為什麼 → 來源（點了開 Safari）→ 逐字稿已改 → 沒把握（橘）。等的時候轉圈圈。
+/// v0.27.0 右邊重點卡的「重查」。等的時候轉圈圈。
+/// v0.28.0：預設收成一行（結論，一行截斷），點一下才展開「為什麼／來源／已改／沒把握」；多筆重查就是多個一行。
+/// 沒把握的猜測（maybe）一律露出來：「原字 → 猜測」＋小的「套用」（只有錄音中有 onApply）。
 private struct RecheckView: View {
     let item: CardRecheck
+    /// 按「套用」第幾個猜測；nil＝只看（結果畫面）
+    var onApply: ((Int) -> Void)? = nil
+    @State private var open = false
+
+    private var summary: String {
+        let text = (item.conclusion ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return "重查：" + (text.isEmpty ? "查完了" : text)
+    }
+
+    private static func pair(_ old: String, _ new: String) -> String {
+        old + " → " + (new.isEmpty ? "（刪掉）" : new)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("重查")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 3) {
             switch item.state {
             case .waiting:
                 HStack(spacing: 6) {
@@ -309,50 +324,105 @@ private struct RecheckView: View {
                     Text(item.note ?? "上網查資料中…")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
                 }
             case .failed:
-                Text(item.note ?? "沒查到")
+                Text("重查：" + (item.note ?? "沒查到"))
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                    .lineLimit(open ? nil : 1)
+                    .onTapGesture { open.toggle() }
             case .done:
-                if let conclusion = item.conclusion, !conclusion.isEmpty {
-                    Text(conclusion)
-                        .font(.system(size: LiveCardView.Size.tidy, weight: .semibold))
+                Button {
+                    open.toggle()
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Image(systemName: open ? "chevron.down" : "chevron.right")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                        Text(summary)
+                            .font(.footnote.weight(.semibold))
+                            .foregroundStyle(Color.primary)
+                            .lineLimit(open ? nil : 1)
+                            .multilineTextAlignment(.leading)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
-                if let why = item.why, !why.isEmpty {
-                    Text(why)
-                        .font(.footnote)
-                }
-                if let sources = item.sources, !sources.isEmpty {
-                    Text("來源")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .padding(.top, 2)
-                    ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
-                        if let url = URL(string: source.url) {
-                            Link(destination: url) {
-                                Text(source.title)
-                                    .font(.caption)
-                                    .lineLimit(2)
-                                    .multilineTextAlignment(.leading)
+                .buttonStyle(.plain)
+                .accessibilityLabel(open ? "收合重查" : "展開重查")
+                // 還沒按的猜測：原字 → 猜測＋「套用」
+                ForEach(Array((item.maybe ?? []).enumerated()), id: \.offset) { index, guess in
+                    if guess.applied == nil {
+                        HStack(spacing: 8) {
+                            Text(Self.pair(guess.old, guess.new))
+                                .font(.caption)
+                                .foregroundStyle(LiveCardView.unsureOrange)
+                                .lineLimit(2)
+                            if let onApply {
+                                Button("套用") {
+                                    onApply(index)
+                                }
+                                .font(.caption.weight(.semibold))
+                                .buttonStyle(.borderless)
+                                .accessibilityLabel("套用：" + Self.pair(guess.old, guess.new))
                             }
                         }
+                        .padding(.leading, 14)
                     }
                 }
-                ForEach(Array((item.applied ?? []).enumerated()), id: \.offset) { _, fix in
-                    Text("逐字稿已改：\(fix.old) → \(fix.new.isEmpty ? "（刪掉）" : fix.new)")
-                        .font(.caption)
-                        .foregroundStyle(LiveText.fixGreen)
-                }
-                if let unsure = item.unsure, !unsure.isEmpty {
-                    Text("沒把握：\(unsure)")
-                        .font(.caption)
-                        .foregroundStyle(LiveCardView.unsureOrange)
+                if open {
+                    details
+                        .padding(.leading, 14)
                 }
             }
         }
-        .padding(.top, 6)
+        .padding(.top, 4)
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// 展開才看：為什麼 → 來源（點了開 Safari）→ 逐字稿已改（綠）→ 找不到原字 → 沒把握（橘）
+    @ViewBuilder
+    private var details: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            if let why = item.why, !why.isEmpty {
+                Text(why)
+                    .font(.footnote)
+            }
+            if let sources = item.sources, !sources.isEmpty {
+                Text("來源")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .padding(.top, 2)
+                ForEach(Array(sources.enumerated()), id: \.offset) { _, source in
+                    if let url = URL(string: source.url) {
+                        Link(destination: url) {
+                            Text(source.title)
+                                .font(.caption)
+                                .lineLimit(2)
+                                .multilineTextAlignment(.leading)
+                        }
+                    }
+                }
+            }
+            ForEach(Array((item.applied ?? []).enumerated()), id: \.offset) { _, fix in
+                Text("逐字稿已改：" + Self.pair(fix.old, fix.new))
+                    .font(.caption)
+                    .foregroundStyle(LiveText.fixGreen)
+            }
+            ForEach(Array((item.maybe ?? []).enumerated()), id: \.offset) { _, guess in
+                if guess.applied == false {
+                    Text("找不到原字，沒套：" + Self.pair(guess.old, guess.new))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            if let unsure = item.unsure, !unsure.isEmpty {
+                Text("沒把握：\(unsure)")
+                    .font(.caption)
+                    .foregroundStyle(LiveCardView.unsureOrange)
+            }
+        }
     }
 }
 
@@ -471,6 +541,10 @@ struct LiveCardView: View {
     var onEdit: ((Int, CardLine) -> Void)? = nil
     /// v0.27.0：Pencil 圈起來的行＝重查（nil＝不能圈）
     var onCircle: (([Int]) -> Void)? = nil
+    /// v0.28.0：逐字稿改了、重點正在照逐字稿重算（重點下面一個小轉圈「更新中」）
+    var refreshing = false
+    /// v0.28.0：按重查裡沒把握的猜測的「套用」（重查編號, 第幾個猜測）；nil＝不能按（結果畫面）
+    var onApplyMaybe: ((Int, Int) -> Void)? = nil
     @State private var anchor = ShareAnchorBox()
     /// v0.26.2：原稿預設收起來（完整文字另外一律顯示）；點「原始轉錄」展開
     @State private var rawOpen = false
@@ -583,6 +657,16 @@ struct LiveCardView: View {
                     .font(.system(size: placeholder ? Size.tidy : Size.key, weight: placeholder ? Font.Weight.regular : Font.Weight.bold))
                     .foregroundStyle(placeholder ? Color.secondary : Color.primary)
             }
+            if refreshing {
+                HStack(spacing: 4) {
+                    ProgressView()
+                        .controlSize(.mini)
+                    Text("更新中")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+                .accessibilityLabel("重點照改好的逐字稿更新中")
+            }
             if !card.tidy.isEmpty {
                 Text(card.tidy)
                     .font(.system(size: Size.tidy))
@@ -595,13 +679,21 @@ struct LiveCardView: View {
         }
     }
 
-    /// v0.27.0 重查結果（一次一段，依先後）
+    /// v0.27.0 重查結果（一次一段，依先後）；v0.28.0 每筆預設一行
     @ViewBuilder
     private var rechecks: some View {
         if let list = card.rechecks, !list.isEmpty {
             ForEach(list) { item in
-                RecheckView(item: item)
+                RecheckView(item: item, onApply: applyAction(item.id))
             }
+        }
+    }
+
+    /// 這筆重查的「套用」；結果畫面（沒有 onApplyMaybe）＝nil，不顯示按鈕
+    private func applyAction(_ recheckID: Int) -> ((Int) -> Void)? {
+        guard let onApplyMaybe else { return nil }
+        return { index in
+            onApplyMaybe(recheckID, index)
         }
     }
 

@@ -30,6 +30,10 @@ struct LiveCardsView: View {
     @State private var dragStart: Double?
     /// v0.27.0：點一行要改的
     @State private var editing: LineEditRequest?
+    /// v0.28.0 跨卡圈選：每行在整個卡片清單的位置、每張卡逐字稿欄的左上角、正在畫的筆跡（改它不重畫）
+    @State private var board = CircleBoard()
+    /// v0.28.0：Pencil 正在圈到的行（可以跨卡；淡底色）
+    @State private var circled: Set<CardLineRef> = []
 
     /// 捲動位置（只比這三個數字）
     private struct Spot: Equatable {
@@ -53,6 +57,8 @@ struct LiveCardsView: View {
                             .font(.system(size: LiveCardView.Size.text))
                             .foregroundStyle(.tertiary)
                     }
+                    // v0.28.0：還在查的重查圈到的行（含跨卡的其他卡），整張清單算一次
+                    let waiting = RecheckPrompt.waitingRows(review.cards)
                     ForEach(review.cards) { card in
                         LiveCardView(card: card, diff: review.diffs[card.id],
                                      slides: SlideRef(course: review.course, source: review.log.slides),
@@ -60,12 +66,22 @@ struct LiveCardsView: View {
                                      onEdit: { index, line in
                                          editing = LineEditRequest(cardID: card.id, line: index, current: line.text, original: line.original)
                                      },
-                                     onCircle: { rows in
-                                         review.recheck(cardID: card.id, lines: rows)
-                                     },
                                      refreshing: review.refreshing.contains(card.id),
                                      onApplyMaybe: { recheckID, index in
                                          review.applyMaybe(cardID: card.id, recheckID: recheckID, index: index)
+                                     },
+                                     marked: marked(card.id, waiting: waiting),
+                                     onLineFrame: { index, rect in
+                                         board.lines[CardLineRef(card: card.id, line: index)] = rect
+                                     },
+                                     onTextFrame: { rect in
+                                         board.origins[card.id] = rect.origin
+                                     },
+                                     onStroke: { point, begin in
+                                         strokeMoved(card.id, point, begin)
+                                     },
+                                     onStrokeEnd: { committed in
+                                         strokeEnded(committed)
                                      })
                     }
                     // 寬的時候即時字只佔左欄（和逐字稿對齊）
@@ -76,6 +92,8 @@ struct LiveCardsView: View {
                         .id(Self.bottomID)
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                // v0.28.0：跨卡圈選用的座標（在捲動內容上，捲動時不變）
+                .coordinateSpace(.named(LiveCardView.listSpace))
                 // v0.27.0：Pencil 不捲動（留給圈字），手指、觸控板照常捲
                 .background(PencilScrollGuard())
             }
@@ -152,6 +170,71 @@ struct LiveCardsView: View {
     }
 
     private static let bottomID = "cards-bottom"
+
+    /// v0.28.0：這張卡要淡底色的行＝還在查的重查圈到的＋Pencil 正在圈到的
+    private func marked(_ cardID: Int, waiting: [Int: Set<Int>]) -> Set<Int> {
+        var rows = waiting[cardID] ?? []
+        for ref in circled where ref.card == cardID {
+            rows.insert(ref.line)
+        }
+        return rows
+    }
+
+    /// v0.28.0 Pencil 在某張卡上畫（座標是那張卡逐字稿欄自己的）：換成整張清單的座標，圈到的行可以跨卡
+    private func strokeMoved(_ cardID: Int, _ point: CGPoint, _ begin: Bool) {
+        let origin = board.origins[cardID] ?? .zero
+        let shared = CGPoint(x: point.x + origin.x, y: point.y + origin.y)
+        if begin {
+            // 開始畫：先丟掉已經不在的卡、已經不在的行（批次合併、整理回來行數變了）的舊位置
+            let counts = Dictionary(review.cards.map { ($0.id, review.lines(of: $0.id).count) }, uniquingKeysWith: { a, _ in a })
+            board.prune(counts: counts)
+            board.stroke = [shared]
+        } else {
+            board.stroke.append(shared)
+        }
+        let hits = Set(board.hits())
+        if hits != circled {
+            circled = hits
+        }
+    }
+
+    /// 放開：圈到的行（可以跨卡）合成一次重查；被系統取消（committed＝false）就不送
+    private func strokeEnded(_ committed: Bool) {
+        let refs = committed ? board.hits() : []
+        board.stroke = []
+        circled = []
+        if !refs.isEmpty {
+            review.recheck(refs)
+        }
+    }
+}
+
+/// v0.28.0 跨卡圈選的位置表（不是畫面狀態：改它不會重畫）。座標都是整個卡片清單（LiveCardView.listSpace）的。
+final class CircleBoard {
+    /// 每張卡每一行的位置
+    var lines: [CardLineRef: CGRect] = [:]
+    /// 每張卡逐字稿欄的左上角（Pencil 的座標加上它＝清單座標）
+    var origins: [Int: CGPoint] = [:]
+    /// 正在畫的筆跡
+    var stroke: [CGPoint] = []
+
+    /// 只留現在還在的卡、還在的行（counts：卡片編號 → 行數）
+    func prune(counts: [Int: Int]) {
+        lines = lines.filter { entry in entry.key.line < (counts[entry.key.card] ?? 0) }
+        origins = origins.filter { counts[$0.key] != nil }
+    }
+
+    /// 筆跡的上下範圍蓋到哪幾行（所有卡一起算，照上下排）
+    func hits() -> [CardLineRef] {
+        guard let first = stroke.first else { return [] }
+        var top = first.y, bottom = first.y
+        for point in stroke {
+            top = min(top, point.y)
+            bottom = max(bottom, point.y)
+        }
+        let boxes = lines.map { CardLineBox(ref: $0.key, top: Double($0.value.minY), bottom: Double($0.value.maxY)) }
+        return CardLines.hitAcross(boxes, top: Double(top), bottom: Double(bottom))
+    }
 }
 
 /// v0.27.0 點一行的改字畫面：上面灰字是原本聽到的（Whisper），下面改；「改」才存
@@ -381,10 +464,21 @@ private struct RecheckView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    /// 展開才看：為什麼 → 來源（點了開 Safari）→ 逐字稿已改（綠）→ 找不到原字 → 沒把握（橘）
+    /// 跨卡圈選時涵蓋到的其他卡（開始時間）
+    private var coverage: String? {
+        guard let also = item.also, !also.isEmpty else { return nil }
+        return "也涵蓋 " + also.map { $0.start.map(CardText.clock) ?? "後面" }.joined(separator: "、") + " 那張卡"
+    }
+
+    /// 展開才看：涵蓋到哪張卡 → 為什麼 → 來源（點了開 Safari）→ 逐字稿已改（綠）→ 找不到原字 → 沒把握（橘）
     @ViewBuilder
     private var details: some View {
         VStack(alignment: .leading, spacing: 3) {
+            if let coverage {
+                Text(coverage)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
             if let why = item.why, !why.isEmpty {
                 Text(why)
                     .font(.footnote)
@@ -539,20 +633,26 @@ struct LiveCardView: View {
     var rightWidth: CGFloat = 300
     /// v0.27.0：點一行＝改字（nil＝只看，例如結果畫面）
     var onEdit: ((Int, CardLine) -> Void)? = nil
-    /// v0.27.0：Pencil 圈起來的行＝重查（nil＝不能圈）
-    var onCircle: (([Int]) -> Void)? = nil
     /// v0.28.0：逐字稿改了、重點正在照逐字稿重算（重點下面一個小轉圈「更新中」）
     var refreshing = false
     /// v0.28.0：按重查裡沒把握的猜測的「套用」（重查編號, 第幾個猜測）；nil＝不能按（結果畫面）
     var onApplyMaybe: ((Int, Int) -> Void)? = nil
+    /// v0.28.0：外面給的淡底色的行（Pencil 正在圈到的、跨卡重查還在查的）
+    var marked: Set<Int> = []
+    /// v0.28.0 跨卡圈選（v0.27.0 只能圈一張卡內）：每行在整張清單（listSpace）的位置、逐字稿欄的位置交給外面記；
+    /// Pencil 的點（這張卡逐字稿欄的座標）交給外面換算、判斷圈到哪幾行。onStroke 是 nil＝不能圈（結果畫面）
+    var onLineFrame: ((Int, CGRect) -> Void)? = nil
+    var onTextFrame: ((CGRect) -> Void)? = nil
+    var onStroke: ((CGPoint, Bool) -> Void)? = nil
+    var onStrokeEnd: ((Bool) -> Void)? = nil
     @State private var anchor = ShareAnchorBox()
     /// v0.26.2：原稿預設收起來（完整文字另外一律顯示）；點「原始轉錄」展開
     @State private var rawOpen = false
-    /// v0.27.0：每行的位置（這張卡逐字稿欄的座標）、Pencil 正在畫的點、畫到的行
-    @State private var boxes: [Int: CGRect] = [:]
+    /// v0.27.0：Pencil 正在畫的點（畫一條淡橘線用）
     @State private var stroke: [CGPoint] = []
-    @State private var circled: Set<Int> = []
 
+    /// v0.28.0 跨卡圈選用的座標名字（LiveCardsView 的捲動內容）
+    static let listSpace = "cards-list"
     static let unsureOrange = Color(red: 0.78, green: 0.40, blue: 0.0)
     /// 圈到的行、重查中的行的淡底色
     static let circleBack = Color(red: 1.0, green: 0.62, blue: 0.2).opacity(0.16)
@@ -697,12 +797,9 @@ struct LiveCardView: View {
         }
     }
 
-    /// 這張卡逐字稿欄的座標名字
-    private var space: String { "card-text-\(card.id)" }
-
-    /// 淡底色的行：Pencil 正在圈的、送出去還在查的
+    /// 淡底色的行：Pencil 正在圈的（外面給）、送出去還在查的
     private var highlighted: Set<Int> {
-        var rows = circled
+        var rows = marked
         for item in card.rechecks ?? [] where item.state == .waiting {
             rows.formUnion(item.lines)
         }
@@ -720,24 +817,25 @@ struct LiveCardView: View {
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
-            .coordinateSpace(.named(space))
             .overlay(alignment: .topLeading) {
                 strokePath
             }
-            .modifier(PencilStrokeModifier(enabled: onCircle != nil, onPoint: { point, begin in
+            // v0.28.0：逐字稿欄在整張清單的位置（Pencil 的點加上它的左上角＝清單座標）
+            .onGeometryChange(for: CGRect.self) { proxy in
+                proxy.frame(in: .named(LiveCardView.listSpace))
+            } action: { rect in
+                onTextFrame?(rect)
+            }
+            .modifier(PencilStrokeModifier(enabled: onStroke != nil, onPoint: { point, begin in
                 if begin {
                     stroke = [point]
                 } else {
                     stroke.append(point)
                 }
-                circled = Set(hitRows())
+                onStroke?(point, begin)
             }, onEnd: { committed in
-                let rows = committed ? hitRows() : []
                 stroke = []
-                circled = []
-                if !rows.isEmpty {
-                    onCircle?(rows)
-                }
+                onStrokeEnd?(committed)
             }))
         }
         if card.state == .done, !card.raw.isEmpty, card.raw != card.transcriptText {
@@ -775,9 +873,9 @@ struct LiveCardView: View {
                 onEdit?(index, line)
             }
             .onGeometryChange(for: CGRect.self) { proxy in
-                proxy.frame(in: .named(space))
+                proxy.frame(in: .named(LiveCardView.listSpace))
             } action: { rect in
-                boxes[index] = rect
+                onLineFrame?(index, rect)
             }
             .accessibilityHint(onEdit == nil ? "" : "點一下改這一行")
     }
@@ -793,18 +891,6 @@ struct LiveCardView: View {
         }
         .stroke(Color.orange.opacity(0.7), style: StrokeStyle(lineWidth: 3, lineCap: .round, lineJoin: .round))
         .allowsHitTesting(false)
-    }
-
-    /// 筆跡的上下範圍蓋到哪幾行
-    private func hitRows() -> [Int] {
-        guard let first = stroke.first else { return [] }
-        var top = first.y, bottom = first.y
-        for point in stroke {
-            top = min(top, point.y)
-            bottom = max(bottom, point.y)
-        }
-        let list = boxes.map { LineBox(index: $0.key, top: Double($0.value.minY), bottom: Double($0.value.maxY)) }
-        return CardLines.hit(list, top: Double(top), bottom: Double(bottom))
     }
 
     /// 一行的字：改過的那段綠色（使用者改的、重查改的都是）；Haiku 擴寫改的字綠色；純刪除的地方一個小紅點

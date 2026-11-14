@@ -309,11 +309,27 @@ enum CardLines {
         }
         return Array(Set(out)).sorted()
     }
+
+    /// v0.28.0 跨卡圈選：所有卡的行（整個卡片清單的座標）用同一套規則判斷圈到哪幾行，依上下位置排（同高再照卡、行）
+    static func hitAcross(_ boxes: [CardLineBox], top: Double, bottom: Double) -> [CardLineRef] {
+        let indexed = boxes.enumerated().map { LineBox(index: $0.offset, top: $0.element.top, bottom: $0.element.bottom) }
+        let picked = hit(indexed, top: top, bottom: bottom).map { boxes[$0] }
+        return picked.sorted { a, b in
+            (a.top, a.ref.card, a.ref.line) < (b.top, b.ref.card, b.ref.line)
+        }.map(\.ref)
+    }
 }
 
 /// 一行在卡片欄裡的上下位置（點）
 struct LineBox: Equatable {
     var index: Int
+    var top: Double
+    var bottom: Double
+}
+
+/// v0.28.0 跨卡圈選：一行在整個卡片清單裡的上下位置（點）
+struct CardLineBox: Equatable {
+    var ref: CardLineRef
     var top: Double
     var bottom: Double
 }
@@ -367,6 +383,13 @@ struct CardLineRef: Hashable {
     var line: Int
 }
 
+/// v0.28.0 跨卡重查：圈到的第一張卡以外的卡（cardID、圈到的行、那張卡的開始秒數，畫面寫「也涵蓋 mm:ss 那張」）
+struct RecheckSpan: Codable, Equatable {
+    var cardID: Int
+    var lines: [Int]
+    var start: Double? = nil
+}
+
 /// v0.28.0 一次重查裡一張卡的部分：這張卡現在畫面上的全部行、圈到其中哪幾行
 struct RecheckPart: Equatable {
     var cardID: Int
@@ -396,6 +419,17 @@ struct CardRecheck: Codable, Equatable, Identifiable {
     var searches: Int? = nil
     /// v0.28.0：沒把握的猜測（可以按「套用」）。舊的卡片.json 沒有這欄＝nil
     var maybe: [RecheckMaybe]? = nil
+    /// v0.28.0：跨卡圈選時，圈到的其他卡（這筆重查掛在圈到的第一張卡上）；nil＝只有這張卡
+    var also: [RecheckSpan]? = nil
+
+    /// 這筆重查涉及的卡和行（第一張是掛著的這張）
+    func spans(host: Int) -> [(card: Int, lines: [Int])] {
+        var out: [(card: Int, lines: [Int])] = [(card: host, lines: lines)]
+        for span in also ?? [] {
+            out.append((card: span.cardID, lines: span.lines))
+        }
+        return out
+    }
 }
 
 /// 重查回覆最後那個 JSON
@@ -711,6 +745,34 @@ enum RecheckPrompt {
         let one = RecheckReply(conclusion: "", why: "", fixes: [fix], unsure: "")
         let result = apply(lines: joined.lines, selected: joined.selected, reply: one)
         return split(result.edits, owner: joined.owner)
+    }
+
+    /// v0.28.0 跨卡圈選：圈到的行依卡分組，卡照 order（卡片的時間順序；不在 order 裡的卡不算），每張卡的行去重複、由小到大
+    static func group(_ refs: [CardLineRef], order: [Int]) -> [(card: Int, rows: [Int])] {
+        var byCard: [Int: Set<Int>] = [:]
+        for ref in refs {
+            byCard[ref.card, default: []].insert(ref.line)
+        }
+        var out: [(card: Int, rows: [Int])] = []
+        for id in order {
+            if let rows = byCard[id], !rows.isEmpty {
+                out.append((card: id, rows: rows.sorted()))
+            }
+        }
+        return out
+    }
+
+    /// v0.28.0 還在查的重查圈到哪些行（含跨卡的其他卡）：卡片編號 → 行（畫面淡底色）
+    static func waitingRows(_ cards: [LiveCard]) -> [Int: Set<Int>] {
+        var out: [Int: Set<Int>] = [:]
+        for card in cards {
+            for item in card.rechecks ?? [] where item.state == .waiting {
+                for span in item.spans(host: card.id) {
+                    out[span.card, default: []].formUnion(span.lines)
+                }
+            }
+        }
+        return out
     }
 }
 

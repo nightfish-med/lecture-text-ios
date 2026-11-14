@@ -77,7 +77,10 @@ enum CardsPDF {
                 addText(attributed(card.note ?? "沒整理到", size: 10, color: .gray), gap: 6)
             }
             for item in card.rechecks ?? [] where item.state == .done {
-                addText(attributed("重查", size: 9, weight: .semibold, color: .gray), gap: 2, keep: true)
+                // v0.28.0：跨卡圈選的重查掛在第一張卡上，註明涵蓋到哪張
+                let others = (item.also ?? []).map { $0.start.map(CardText.clock) ?? "後面" }
+                let recheckTitle = others.isEmpty ? "重查" : "重查（也涵蓋 " + others.joined(separator: "、") + " 那張卡）"
+                addText(attributed(recheckTitle, size: 9, weight: .semibold, color: .gray), gap: 2, keep: true)
                 if let conclusion = item.conclusion, !conclusion.isEmpty { addText(attributed(conclusion, size: 11, weight: .semibold), gap: 2) }
                 if let why = item.why, !why.isEmpty { addText(attributed(why, size: 10), gap: 2) }
                 for source in item.sources ?? [] {
@@ -88,8 +91,8 @@ enum CardsPDF {
                 }
                 // v0.28.0：沒把握的猜測（按了套用的已經在「逐字稿已改」）
                 for guess in item.maybe ?? [] where guess.applied != true {
-                    let head = guess.applied == false ? "找不到原字，沒套：" : "可能（沒套用）："
-                    addText(attributed(head + "\(guess.old) → \(guess.new)", size: 9, color: .systemOrange), gap: 2)
+                    let label = guess.applied == false ? "找不到原字，沒套：" : "可能（沒套用）："
+                    addText(attributed(label + "\(guess.old) → \(guess.new)", size: 9, color: .systemOrange), gap: 2)
                 }
                 if let unsure = item.unsure, !unsure.isEmpty { addText(attributed("沒把握：" + unsure, size: 9, color: .systemOrange), gap: 2) }
             }

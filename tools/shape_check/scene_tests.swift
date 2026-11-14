@@ -387,4 +387,41 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     item.maybe = [RecheckMaybe(old: "甲", new: "乙", applied: true), RecheckMaybe(old: "丙", new: "丁")]
     let reread = (try? JSONEncoder().encode(item)).flatMap { try? JSONDecoder().decode(CardRecheck.self, from: $0) }
     check(reread == item ? "一樣" : "不一樣", "一樣", "卡片.json：猜測和已套用存得進去也讀得回來")
+
+    // ---- 跨卡圈選：圈到哪幾行（整張清單的座標）
+    func box(_ card: Int, _ line: Int, _ top: Double) -> CardLineBox {
+        CardLineBox(ref: CardLineRef(card: card, line: line), top: top, bottom: top + 20)
+    }
+    let listBoxes = [box(4, 0, 100), box(3, 1, 22), box(3, 0, 0), box(4, 1, 122), box(3, 2, 44)]
+    func across(_ top: Double, _ bottom: Double) -> String {
+        CardLines.hitAcross(listBoxes, top: top, bottom: bottom).map { "\($0.card).\($0.line)" }.joined(separator: ",")
+    }
+    check(across(30, 115), "3.1,3.2,4.0", "跨卡圈行：一筆跨過兩張卡，照上下排")
+    check(across(-5, 70), "3.0,3.1,3.2", "跨卡圈行：只在一張卡內和以前一樣")
+    check(across(300, 310), "4.1", "跨卡圈行：都沒碰到取最近的一行")
+    check(CardLines.hitAcross([], top: 0, bottom: 10).isEmpty ? "空" : "有", "空", "跨卡圈行：沒有行")
+
+    // ---- 跨卡圈選：分組、掛在第一張卡、還在查的行
+    let refs = [CardLineRef(card: 4, line: 0), CardLineRef(card: 3, line: 2), CardLineRef(card: 3, line: 1), CardLineRef(card: 3, line: 2),
+                CardLineRef(card: 8, line: 0)]
+    check(RecheckPrompt.group(refs, order: [3, 4, 5]).map { "\($0.card):" + $0.rows.map(String.init).joined(separator: "+") }.joined(separator: " "),
+          "3:1+2 4:0", "跨卡分組：照卡的時間順序、行去重複排好、不在清單的卡不算")
+    var span = CardRecheck(id: 6, lines: [1, 2], asked: "甲卡二\n甲卡三\n士的事")
+    span.also = [RecheckSpan(cardID: 4, lines: [0], start: 125)]
+    check(span.spans(host: 3).map { "\($0.card):" + $0.lines.map(String.init).joined(separator: "+") }.joined(separator: " "), "3:1+2 4:0",
+          "跨卡重查：涉及的卡＝掛著的這張＋also")
+    var host = LiveCard(id: 3, start: 60, end: 120, raw: "甲。")
+    var doneSpan = span
+    doneSpan.id = 7
+    doneSpan.state = .done
+    doneSpan.lines = [0]
+    doneSpan.also = [RecheckSpan(cardID: 4, lines: [1])]
+    host.rechecks = [span, doneSpan]
+    let waiting = RecheckPrompt.waitingRows([host, LiveCard(id: 4, start: 120, end: 180, raw: "乙。")])
+    check(waiting.keys.sorted().map { k in "\(k):" + (waiting[k] ?? []).sorted().map(String.init).joined(separator: "+") }.joined(separator: " "),
+          "3:1+2 4:0", "跨卡重查：還在查的行（含別張卡）淡底色，查完的不算")
+    check(CardText.clock(span.also?.first?.start ?? 0), "02:05", "跨卡重查：涵蓋的卡寫開始時間")
+    let spanBack = (try? JSONEncoder().encode(span)).flatMap { try? JSONDecoder().decode(CardRecheck.self, from: $0) }
+    check(spanBack == span ? "一樣" : "不一樣", "一樣", "卡片.json：跨卡的 also 存得進去也讀得回來")
+    check(decodedRecheck.map { $0.also == nil ? "nil" : "有" } ?? "讀不進來", "nil", "舊卡片.json：重查沒有 also 照讀")
 }

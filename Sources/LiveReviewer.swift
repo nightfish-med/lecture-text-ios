@@ -661,14 +661,37 @@ final class LiveReviewer {
     /// Pencil 圈起來：只送圈到的行＋這張卡的重點（不送整份逐字稿），Haiku 帶網路搜尋查。網路錯照卡片的重試；回來後只改圈到的行。
     /// v0.28.0：重查一個一個跑（前一個還沒回來就先寫「排隊中」）
     func recheck(cardID: Int, lines selected: [Int]) {
-        guard !closed, !wrapped, var card = cards.first(where: { $0.id == cardID }) else { return }
-        let current = CardLines.build(card, diff: diffs[cardID])
-        let rows = Array(Set(selected)).sorted().filter { $0 >= 0 && $0 < current.count }
-        guard !rows.isEmpty else { return }
-        let texts = rows.map { current[$0].text }
+        recheck(selected.map { CardLineRef(card: cardID, line: $0) })
+    }
+
+    /// v0.28.0 跨卡：一筆圈選可以涵蓋相鄰幾張卡的行，合成一次重查。行照卡的時間順序接起來，重點用第一張卡的；
+    /// 結果掛在圈到的第一張卡上（also 記其他卡），改法各自套回所屬的卡。
+    func recheck(_ refs: [CardLineRef]) {
+        guard !closed, !wrapped else { return }
+        var parts: [RecheckPart] = []
+        for group in RecheckPrompt.group(refs, order: cards.map(\.id)) {
+            guard let card = cards.first(where: { $0.id == group.card }) else { continue }
+            let lines = CardLines.build(card, diff: diffs[group.card]).map(\.text)
+            let rows = group.rows.filter { $0 >= 0 && $0 < lines.count }
+            if !rows.isEmpty {
+                parts.append(RecheckPart(cardID: group.card, lines: lines, selected: rows))
+            }
+        }
+        guard let first = parts.first, var card = cards.first(where: { $0.id == first.cardID }) else { return }
+        let cardID = first.cardID
+        let joined = RecheckPrompt.combine(parts)
+        let texts = joined.selected.map { joined.lines[$0] }
         let id = nextRecheckID
         nextRecheckID += 1
-        var item = CardRecheck(id: id, lines: rows, asked: texts.joined(separator: "\n"))
+        var item = CardRecheck(id: id, lines: first.selected, asked: texts.joined(separator: "\n"))
+        var others: [RecheckSpan] = []
+        for part in parts.dropFirst() {
+            let start = cards.first(where: { $0.id == part.cardID })?.start
+            others.append(RecheckSpan(cardID: part.cardID, lines: part.selected, start: start))
+        }
+        if !others.isEmpty {
+            item.also = others
+        }
         if let stop {
             item.state = .failed
             item.note = "Haiku 這場已停（\(stop.short)），沒有送"
@@ -679,7 +702,7 @@ final class LiveReviewer {
         put(card)
         save()
         guard stop == nil else { return }
-        onEvent("重查：第 \(cardID) 張卡圈了 \(rows.count) 行")
+        onEvent("重查：第 \(cardID) 張卡圈了 \(texts.count) 行" + (others.isEmpty ? "" : "（跨 \(parts.count) 張卡）"))
         let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts)
         enqueueRecheck(cardID: cardID, recheckID: id, message: message)
     }
@@ -801,13 +824,12 @@ final class LiveReviewer {
         }
     }
 
-    /// v0.28.0：一次重查涉及的卡和圈到的行（每張卡用現在畫面上的行）；卡不見了（批次合併）就跳過
+    /// v0.28.0：一次重查涉及的卡和圈到的行（每張卡用現在畫面上的行；跨卡的其他卡在 also）；卡不見了（批次合併）就跳過
     private func recheckParts(hostID: Int, item: CardRecheck) -> [RecheckPart] {
-        let refs: [(Int, [Int])] = [(hostID, item.lines)]
         var parts: [RecheckPart] = []
-        for (id, rows) in refs {
-            guard let card = cards.first(where: { $0.id == id }) else { continue }
-            parts.append(RecheckPart(cardID: id, lines: CardLines.build(card, diff: diffs[id]).map(\.text), selected: rows))
+        for span in item.spans(host: hostID) {
+            guard let card = cards.first(where: { $0.id == span.card }) else { continue }
+            parts.append(RecheckPart(cardID: span.card, lines: CardLines.build(card, diff: diffs[span.card]).map(\.text), selected: span.lines))
         }
         return parts
     }

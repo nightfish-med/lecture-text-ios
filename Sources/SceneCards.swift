@@ -78,11 +78,14 @@ enum RecordScene: String, CaseIterable, Codable {
 
 /// 一行的改動。line＝改的時候是第幾行；before＝改之前那行的字；after＝改成的字。
 /// by：user＝使用者點一下改的（之後的批次送 Haiku 時當參考）；web＝Pencil 圈起來重查改的。
+/// v0.28.0：note＝使用者寫在「跟 AI 說」的話（不進逐字稿，只附在之後送 Haiku 的訊息）。舊的卡片.json 沒有這欄＝nil。
+/// 只寫 note、沒改字時 before＝after，套用時跳過（不算改過）。
 struct CardEdit: Codable, Equatable {
     var line: Int
     var before: String
     var after: String
     var by: String
+    var note: String? = nil
 
     static let user = "user"
     static let web = "web"
@@ -105,6 +108,8 @@ enum CardEdits {
         var out = lines
         var first: [Int: String] = [:]
         for edit in edits {
+            // v0.28.0：只寫「跟 AI 說」、沒改字的不動那一行（不算改過、不畫綠字）
+            if edit.before == edit.after { continue }
             var target: Int?
             var replaced = edit.after
             if edit.line >= 0, edit.line < out.count, out[edit.line] == edit.before {
@@ -152,11 +157,42 @@ enum CardEdits {
         return out.reversed()
     }
 
-    /// 卡片使用者訊息後面接的一段（沒有改過＝空字串）
+    /// v0.28.0 送 Haiku 的使用者說明：使用者改的那幾筆裡有寫 note 的（最近的 limit 筆、去重複、換行變空白、每筆最多 100 字），
+    /// 後面括號帶那一行的前 20 字，Haiku 才知道是在講哪裡。
+    static func promptNotes(_ edits: [CardEdit], limit: Int = 10) -> [String] {
+        var seen = Set<String>()
+        var out: [String] = []
+        for edit in edits.reversed() where edit.by == CardEdit.user {
+            let flat = (edit.note ?? "").replacingOccurrences(of: "\n", with: " ")
+            let note = flat.trimmingCharacters(in: .whitespacesAndNewlines)
+            if note.isEmpty { continue }
+            let short = String(note.prefix(100))
+            guard !seen.contains(short) else { continue }
+            seen.insert(short)
+            let line = edit.after.trimmingCharacters(in: .whitespacesAndNewlines)
+            out.append(line.isEmpty ? short : short + "（寫在這一行：" + String(line.prefix(20)) + "）")
+            if out.count >= limit { break }
+        }
+        return out.reversed()
+    }
+
+    /// v0.28.0 改字對照的說明：只套一模一樣的原字，發音像的不套；改字不代表主題
+    static let pairsHead = "這場使用者改過的字（左＝原本聽到的，右＝使用者改成的）。只有這段原稿裡出現和左邊一模一樣的字，才照右邊寫；發音相近但字不同的詞不要套用。這些改字不代表這堂課的主題，主題照課名："
+    /// v0.28.0 使用者在「跟 AI 說」寫的話
+    static let notesHead = "使用者的說明（照著做，但不要寫進 expanded）："
+
+    /// 卡片使用者訊息後面接的一段：改字對照、使用者的說明，各自有才放（都沒有＝空字串）
     static func promptBlock(_ edits: [CardEdit]) -> String {
         let pairs = promptPairs(edits)
-        guard !pairs.isEmpty else { return "" }
-        return "\n\n這場使用者改過（左＝原本聽到的，右＝使用者改成的；同樣的字照這樣寫）：\n" + pairs.joined(separator: "\n")
+        let notes = promptNotes(edits)
+        var out = ""
+        if !pairs.isEmpty {
+            out += "\n\n" + pairsHead + "\n" + pairs.joined(separator: "\n")
+        }
+        if !notes.isEmpty {
+            out += "\n\n" + notesHead + "\n" + notes.joined(separator: "\n")
+        }
+        return out
     }
 }
 

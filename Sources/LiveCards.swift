@@ -393,6 +393,12 @@ enum CardText {
         return parts.filter { !$0.isEmpty }.joined(separator: "\n\n")
     }
 
+    /// v0.28.0：重點是固定字樣（「（這段聽不清）」「（現場口令）」這類整句包在全形括號裡）＝這段沒有內容，畫面淡化
+    static func isPlaceholderKey(_ key: String) -> Bool {
+        let k = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        return k.count >= 3 && k.hasPrefix("（") && k.hasSuffix("）")
+    }
+
     /// 狀態列頁碼：時間最晚、有頁碼的那張卡
     static func latestPage(_ cards: [LiveCard]) -> Int? {
         cards.filter { $0.page != nil }.max { $0.start < $1.start }?.page

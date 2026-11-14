@@ -621,15 +621,19 @@ final class LiveReviewer {
     }
 
     /// 使用者改一行：before 要和現在畫面上那行一樣才記（畫面剛好換掉時不亂改）
-    func editLine(cardID: Int, line: Int, before: String, after: String) {
+    /// v0.28.0：note＝「跟 AI 說」那格（不進逐字稿）；只寫 note 沒改字也記（before＝after，套用時跳過）
+    func editLine(cardID: Int, line: Int, before: String, after: String, note: String = "") {
         let text = after.replacingOccurrences(of: "\n", with: "")
-        guard text != before, var card = cards.first(where: { $0.id == cardID }) else { return }
+        let memo = note.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard text != before || !memo.isEmpty, var card = cards.first(where: { $0.id == cardID }) else { return }
         let current = CardLines.build(card, diff: diffs[cardID])
         guard line >= 0, line < current.count, current[line].text == before else { return }
-        card.edits = (card.edits ?? []) + [CardEdit(line: line, before: before, after: text, by: CardEdit.user)]
+        let edit = CardEdit(line: line, before: before, after: text, by: CardEdit.user, note: memo.isEmpty ? nil : memo)
+        card.edits = (card.edits ?? []) + [edit]
         put(card)
         save()
-        onEvent("使用者改了第 \(cardID) 張卡的一行")
+        // log 不寫字（改的字、說明都只進卡片.json）
+        onEvent(text != before ? "使用者改了第 \(cardID) 張卡的一行" : "使用者在第 \(cardID) 張卡留了說明")
     }
 
     /// Pencil 圈起來：只送圈到的行＋這張卡的重點（不送整份逐字稿），Haiku 帶網路搜尋查。網路錯照卡片的重試；回來後只改圈到的行。

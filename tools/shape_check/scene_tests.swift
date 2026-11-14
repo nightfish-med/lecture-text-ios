@@ -50,7 +50,34 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
     check(CardEdits.promptPairs(edits).joined(separator: "、"), "練習→連鎖、天講法則→天講連鎖法則", "參考：只收使用者改的、去重複、純加字帶前後字")
     check(CardEdits.promptBlock([]), "", "參考：沒改過＝空字串")
     let block = CardEdits.promptBlock(edits)
-    check(block.hasPrefix("\n\n這場使用者改過") && block.hasSuffix("天講法則→天講連鎖法則") ? "對" : block, "對", "參考：一段字接在訊息最後")
+    check(block, "\n\n" + CardEdits.pairsHead + "\n練習→連鎖\n天講法則→天講連鎖法則", "參考：一段字接在訊息最後（沒有說明就沒有說明段）")
+    check(CardEdits.pairsHead.contains("一模一樣") && CardEdits.pairsHead.contains("發音相近") && CardEdits.pairsHead.contains("不代表這堂課的主題") ? "對" : CardEdits.pairsHead,
+          "對", "參考：改字只套一模一樣的原字、發音像的不套、不代表主題")
+
+    // ---- v0.28.0 跟 AI 說（note）：不進逐字稿，只附在之後的批次
+    func noted(_ line: Int, _ before: String, _ after: String, _ note: String?, _ by: String = CardEdit.user) -> CardEdit {
+        CardEdit(line: line, before: before, after: after, by: by, note: note)
+    }
+    let onlyNote = [noted(0, "今天講幾何。", "今天講幾何。", "這堂是解析幾何，不是代數")]
+    check("\(CardEdits.promptPairs(onlyNote).count)", "0", "說明：只寫說明沒改字＝沒有改字對照")
+    check(CardEdits.promptBlock(onlyNote), "\n\n" + CardEdits.notesHead + "\n這堂是解析幾何，不是代數（寫在這一行：今天講幾何。）",
+          "說明：只寫說明也送，帶那一行的字")
+    let mixed = [noted(0, "這叫做練習法則。", "這叫做連鎖法則。", "查一下連鎖法則\n的定義"), noted(1, "甲句。", "甲句。", "  "),
+                 noted(2, "乙句。", "乙句。", "查一下連鎖法則 的定義"), noted(3, "網路查的字", "網路改的字", "網路的說明", CardEdit.web)]
+    check(CardEdits.promptBlock(mixed),
+          "\n\n" + CardEdits.pairsHead + "\n練習→連鎖\n\n" + CardEdits.notesHead + "\n查一下連鎖法則 的定義（寫在這一行：乙句。）",
+          "說明：改字段在前、說明段在後；換行變空白、空白說明不算、重複只留一筆、重查的不算")
+    let longLine = String(repeating: "丙", count: 30)
+    check(CardEdits.promptNotes([noted(0, longLine, longLine, String(repeating: "丁", count: 120))]).first ?? "沒有",
+          String(repeating: "丁", count: 100) + "（寫在這一行：" + String(repeating: "丙", count: 20) + "）", "說明：最多 100 字、行只帶前 20 字")
+    let oldEdit = #"{"line":2,"before":"甲句。","after":"乙句。","by":"user"}"#
+    let decodedEdit = try? JSONDecoder().decode(CardEdit.self, from: Data(oldEdit.utf8))
+    check(decodedEdit.map { "\($0.line)|\($0.after)|" + ($0.note ?? "nil") } ?? "讀不進來", "2|乙句。|nil", "舊卡片.json：沒有 note 欄照樣讀得進來")
+    var stored = LiveCard(id: 7, start: 0, end: 1, raw: "甲句。")
+    stored.edits = [noted(0, "甲句。", "甲句。", "這段是自我介紹")]
+    let storedData = try? JSONEncoder().encode(stored)
+    let reread = storedData.flatMap { try? JSONDecoder().decode(LiveCard.self, from: $0) }
+    check(reread == stored ? "一樣" : "不一樣", "一樣", "卡片.json：說明存得進去也讀得回來")
     let message = CardPrompt.userMessage(context: "", raw: "這段原稿", reference: "", referenceName: "Apple", userEdits: block)
     check(message.hasSuffix(block) && message.contains("這段原稿") ? "對" : message, "對", "卡片訊息：使用者改過的接在最後")
     check(CardPrompt.userMessage(context: "", raw: "這段", reference: "", referenceName: "Apple")
@@ -77,6 +104,23 @@ func sceneTests(_ check: @escaping (String, String, String) -> Void) {
     check(edited.transcriptText, "好，那我們今天上課要講連鎖法則。那麼它的意義是？", "逐字稿：用改過的字")
     check(CardText.share(edited).contains("那麼它的意義是？") ? "有" : "沒有", "有", "分享：用改過的字")
     check(CardText.transcript([edited]), "好，那我們今天上課要講連鎖法則。那麼它的意義是？", "停止後逐字稿：用改過的字")
+    var memo = card
+    memo.edits = [noted(1, "那麼它的意思是？", "那麼它的意思是？", "這裡的意思是定義")]
+    let memoLines = CardLines.build(memo, diff: diff)
+    check(memoLines.map(\.text).joined(separator: "/") + "|" + (memoLines[1].editedFrom ?? "nil"),
+          "好，那我們今天上課要講連鎖法則。/那麼它的意思是？|nil", "說明：只寫說明的行字不變、不算改過")
+    check(memo.transcriptText, "好，那我們今天上課要講連鎖法則。那麼它的意思是？", "說明：只寫說明不動逐字稿")
+    var both = card
+    both.edits = [noted(1, "那麼它的意思是？", "那麼它的意義是？", "說明不要進稿")]
+    check(both.transcriptText, "好，那我們今天上課要講連鎖法則。那麼它的意義是？", "說明：改字照樣進逐字稿")
+    let exported = CardText.transcript([both]) + CardText.share(both) + CardText.tidyFile([both])
+    check(exported.contains("說明不要進稿") ? "有" : "沒有", "沒有", "說明：不進逐字稿、分享、整理版")
+
+    // ---- v0.28.0 重點是固定字樣（聽不清、現場口令）
+    check(["（這段聽不清）", " （現場口令） ", "連鎖法則", "（", "（）", "連鎖法則（複習）"].map { CardText.isPlaceholderKey($0) ? "淡" : "一般" }.joined(separator: "/"),
+          "淡/淡/一般/一般/一般/一般", "重點：整句包在全形括號裡才淡化")
+    check(["講者", "不要一律寫「老師」", "（現場口令）", "（這段聽不清）", "以課名為準", "原樣保留原字", "不要刪"].filter { !CardPrompt.system.contains($0) }.joined(separator: "、"),
+          "", "卡片提示詞：講者不一律寫老師、口令不編重點、主題照課名、沒證據不改字不刪詞")
     var failed = LiveCard(id: 4, start: 0, end: 5, raw: "第一句。第二句")
     failed.state = .failed
     check(CardLines.build(failed, diff: nil).map { $0.text + "=" + $0.original }.joined(separator: "/"), "第一句。=第一句。/第二句=第二句", "卡片的行：沒整理到用原稿")

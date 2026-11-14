@@ -109,8 +109,8 @@ struct LiveCardsView: View {
             }
         }
         .sheet(item: $editing) { request in
-            LineEditSheet(request: request) { text in
-                review.editLine(cardID: request.cardID, line: request.line, before: request.current, after: text)
+            LineEditSheet(request: request) { text, note in
+                review.editLine(cardID: request.cardID, line: request.line, before: request.current, after: text, note: note)
             }
         }
     }
@@ -151,16 +151,24 @@ struct LiveCardsView: View {
 }
 
 /// v0.27.0 點一行的改字畫面：上面灰字是原本聽到的（Whisper），下面改；「改」才存
+/// v0.28.0：分兩格。上格＝這一行的字（進逐字稿）；下格＝跟 AI 說（不進逐字稿，之後的批次送 Haiku 時附上）。只寫下格也能存。
 struct LineEditSheet: View {
     let request: LineEditRequest
-    let save: (String) -> Void
+    /// （這一行的字, 跟 AI 說的話）
+    let save: (String, String) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var text: String
+    @State private var note = ""
 
-    init(request: LineEditRequest, save: @escaping (String) -> Void) {
+    init(request: LineEditRequest, save: @escaping (String, String) -> Void) {
         self.request = request
         self.save = save
         _text = State(initialValue: request.current)
+    }
+
+    /// 字沒改、下格也空＝不能按「改」
+    private var unchanged: Bool {
+        text == request.current && note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     var body: some View {
@@ -178,6 +186,10 @@ struct LineEditSheet: View {
                     .lineLimit(1...6)
                     .textFieldStyle(.roundedBorder)
                     .padding(.top, 6)
+                TextField("跟 AI 說（不會進逐字稿）", text: $note, axis: .vertical)
+                    .font(.callout)
+                    .lineLimit(1...4)
+                    .textFieldStyle(.roundedBorder)
                 Spacer(minLength: 0)
             }
             .padding(16)
@@ -191,10 +203,10 @@ struct LineEditSheet: View {
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("改") {
-                        save(text)
+                        save(text, note)
                         dismiss()
                     }
-                    .disabled(text == request.current)
+                    .disabled(unchanged)
                 }
             }
         }
@@ -565,8 +577,11 @@ struct LiveCardView: View {
                 .foregroundStyle(.secondary)
         case .done:
             if !card.key.isEmpty {
+                // v0.28.0：聽不清、現場口令這類固定字樣淡化、不用大字
+                let placeholder = CardText.isPlaceholderKey(card.key)
                 Text(card.key)
-                    .font(.system(size: Size.key, weight: .bold))
+                    .font(.system(size: placeholder ? Size.tidy : Size.key, weight: placeholder ? Font.Weight.regular : Font.Weight.bold))
+                    .foregroundStyle(placeholder ? Color.secondary : Color.primary)
             }
             if !card.tidy.isEmpty {
                 Text(card.tidy)

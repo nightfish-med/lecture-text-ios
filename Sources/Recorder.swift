@@ -228,7 +228,9 @@ final class AudioPump: @unchecked Sendable {
             try installTap()
             engine.prepare()
             try engine.start()
-            return (true, "\(switched)已接回麥克風（\(Self.currentInput())）")
+            // 改共用那次 engine 沒開起來（那行以「接不回來」開頭，看門狗不記）：之後接回來時照樣寫這場是共用
+            let sharedNote = switched.isEmpty && fellBackToShared ? "（這場已改成和別的 App 共用）" : ""
+            return (true, "\(switched)已接回麥克風（\(Self.currentInput())）\(sharedNote)")
         } catch {
             return (false, "接不回來：\(error.localizedDescription)\(Self.code(error))" + (switched.isEmpty ? "" : "（\(switched)）"))
         }

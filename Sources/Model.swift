@@ -812,10 +812,10 @@ final class AppModel {
                 case .resumed(let lost)?:
                     // v0.28.0：存成一段中斷（場的 json 跟著存）；停止後逐字稿、md、PDF 在那個錄音位置插一行〔錄音中斷…〕
                     let now = Date()
-                    let gap = RecordGap(at: self.stallSpot?.at ?? ((self.continuing?.offset ?? 0) + audio),
-                                        lost: lost,
-                                        from: RecordGap.stamp(self.stallSpot?.since ?? now.addingTimeInterval(-lost)),
-                                        to: RecordGap.stamp(now))
+                    let fallbackAt: Double = (self.continuing?.offset ?? 0) + audio
+                    let gapAt: Double = self.stallSpot?.at ?? fallbackAt
+                    let gapSince: Date = self.stallSpot?.since ?? now.addingTimeInterval(-lost)
+                    let gap = RecordGap(at: gapAt, lost: lost, from: RecordGap.stamp(gapSince), to: RecordGap.stamp(now))
                     self.stallSpot = nil
                     self.sessionGaps.append(gap)
                     var gaps = self.run?.gaps ?? []

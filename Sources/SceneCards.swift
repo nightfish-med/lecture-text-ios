@@ -179,7 +179,7 @@ enum CardEdits {
     /// v0.28.0 改字對照的說明：只套一模一樣的原字，發音像的不套；改字不代表主題
     static let pairsHead = "這場使用者改過的字（左＝原本聽到的，右＝使用者改成的）。只有這段原稿裡出現和左邊一模一樣的字，才照右邊寫；發音相近但字不同的詞不要套用。這些改字不代表這堂課的主題，主題照課名："
     /// v0.28.0 使用者在「跟 AI 說」寫的話
-    static let notesHead = "使用者的說明（照著做，但不要寫進 expanded）："
+    static let notesHead = "使用者的說明（照著做，但不要把說明的字抄進 expanded）："
 
     /// 卡片使用者訊息後面接的一段：改字對照、使用者的說明，各自有才放（都沒有＝空字串）
     static func promptBlock(_ edits: [CardEdit]) -> String {

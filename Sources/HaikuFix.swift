@@ -870,6 +870,18 @@ struct ReviewLog: Codable, Equatable {
     var nonCourse: Bool? = nil
     /// v0.29.0：非課程時使用者寫的主題；nil＝沒寫或舊檔
     var topic: String? = nil
+    /// v0.29.1 非課程的參照詞（網路搜尋整理的專有名詞＋短說明，最多 30 個）；nil＝沒搜尋過或舊檔。續錄讀回來，不從頭搜
+    var refTerms: [RefTerm]? = nil
+    /// v0.29.1：搜尋整理的一句「這場大概在講什麼」
+    var refAbout: String? = nil
+    /// v0.29.1：參照詞搜尋拿到回應的輪數（一場最多 3 輪）
+    var refRounds: Int? = nil
+    /// v0.29.1：參照詞搜尋沒拿到回應（網路錯、4xx）的次數（不算輪數；3 次就不再搜）
+    var refFailures: Int? = nil
+    /// v0.29.1：參照詞搜尋的花費（美元）。另計：不加進 costUSD，所以不會讓卡片的 1 美元上限停掉這場；摘要一行另外寫
+    var refCostUSD: Double? = nil
+    /// v0.29.1：上次參照詞搜尋或檢查時的錄音秒數（含續錄位移）；nil＝還沒搜尋過
+    var refLastCheck: Double? = nil
 
     init(course: String, slides: String? = nil) {
         self.course = course
@@ -905,6 +917,15 @@ struct ReviewLog: Codable, Equatable {
         let blocked = fixes.count - passed
         var line = "Haiku：\(batches.count) 批（完成 \(done)）、改字通過 \(passed)、擋下 \(blocked)"
             + (promotedCount > 0 ? "、升級全場 \(promotedCount) 條" : "") + "、約 " + String(format: "%.3f", costUSD) + " 美元"
+        // v0.29.1：參照詞搜尋只寫個數、輪數、花費（另計），不寫詞
+        let rounds: Int = refRounds ?? 0
+        let failures: Int = refFailures ?? 0
+        if rounds > 0 || failures > 0 {
+            let count: Int = refTerms?.count ?? 0
+            let spent: Double = refCostUSD ?? 0
+            line += "、參照詞 \(count) 個（搜尋 \(rounds) 輪" + (failures > 0 ? "、沒查到 \(failures) 次" : "")
+                + "、約 " + String(format: "%.3f", spent) + " 美元另計）"
+        }
         if let last = batches.last(where: { $0.error != nil })?.error {
             line += "；最後錯誤：" + String(last.prefix(80))
         }
@@ -932,6 +953,12 @@ extension ReviewLog {
         disabled = try c.decodeIfPresent([String].self, forKey: .disabled) ?? []
         nonCourse = try c.decodeIfPresent(Bool.self, forKey: .nonCourse)
         topic = try c.decodeIfPresent(String.self, forKey: .topic)
+        refTerms = try c.decodeIfPresent([RefTerm].self, forKey: .refTerms)
+        refAbout = try c.decodeIfPresent(String.self, forKey: .refAbout)
+        refRounds = try c.decodeIfPresent(Int.self, forKey: .refRounds)
+        refFailures = try c.decodeIfPresent(Int.self, forKey: .refFailures)
+        refCostUSD = try c.decodeIfPresent(Double.self, forKey: .refCostUSD)
+        refLastCheck = try c.decodeIfPresent(Double.self, forKey: .refLastCheck)
     }
 }
 

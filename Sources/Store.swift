@@ -316,7 +316,7 @@ enum Store {
             (" 即時稿.txt", "live.txt", "錄音當下的即時稿（按停止時存的，定稿前的字；續錄的每段用「——第N段即時稿——」分開）"),
             (" 即時時間.json", "live_times.json", "即時稿每一小段字的開始、結束秒數（續錄從第一段開頭算）"),
             // v0.23.2：錄音中 Haiku 改字紀錄
-            (" 改字.json", "fixes.json", "錄音中 Haiku 紀錄：每批送了哪些單位、花多少、每條改字的判定與定稿命中、每批判出的投影片頁碼 pages（unitText、context、finalWindow 是稿的字）"),
+            (" 改字.json", "fixes.json", "錄音中 Haiku 紀錄：每批送了哪些單位、花多少、每條改字的判定與定稿命中、每批判出的投影片頁碼 pages、非課程網路搜尋整理的參照詞 refTerms（專有名詞＋短說明）、refAbout、refRounds、refCostUSD（unitText、context、finalWindow 是稿的字）"),
             // v0.26.0：即時模式 1 每批一張卡
             (" 卡片.json", "cards.json", "即時模式 1 每批一張卡：start、end（錄音秒數）、page（投影片頁碼）、key（一句重點）、tidy（整理版）、unsure（不確定的詞）、raw（送出的 Whisper 原稿）、expanded（Haiku 擴寫式校正的全文，逐字稿就是這些接起來）、costUSD（這張卡花的美元）、state（done／failed＝沒整理到）"),
             // v0.23.5：下課後用 Whisper 在裝置上再轉的一份（開關在星星選單，預設關；轉完才有）

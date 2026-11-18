@@ -86,6 +86,12 @@ final class LiveReviewer {
     private(set) var refreshing: Set<Int> = []
     /// v0.28.0：停止收尾了（補送期限到）：不再送新的重算、重查，晚回來的不套
     @ObservationIgnored private var wrapped = false
+    /// v0.29.1 非課程的參照詞搜尋：排進重查的隊伍到跑完（排的當下就設，免得每秒的檢查又排一次）；狀態列看得到
+    private(set) var refBusy = false
+    /// v0.29.1：改主題後可以搜尋的時間（牆上時間；再改就從頭等）；nil＝沒改
+    @ObservationIgnored private var refTopicAt: Date?
+    /// v0.29.1：「這場不再搜尋」只記一次
+    @ObservationIgnored private var refStopLogged = false
 
     /// base：續錄時原場的改字紀錄（已學規則、off、最大單位編號照舊）
     /// v0.27.0：courseBlock 有給就用它（討論會沒有課名時的中性區塊）；nil＝照課名、對照表、投影片產生
@@ -209,8 +215,13 @@ final class LiveReviewer {
     var statusLine: String {
         if cardMode {
             let mine = cards.filter { $0.id >= firstBatchID }
-            return ReviewText.cardStatus(done: mine.filter { $0.state == .done }.count, failed: mine.filter { $0.state == .failed }.count,
-                                         lastLatency: lastLatency, stop: stop)
+            let base: String = ReviewText.cardStatus(done: mine.filter { $0.state == .done }.count, failed: mine.filter { $0.state == .failed }.count,
+                                                     lastLatency: lastLatency, stop: stop)
+            // v0.29.1 非課程：參照詞搜尋中／找到幾個（同一行，不另開橫幅）
+            let refCount: Int = log.refTerms?.count ?? 0
+            let refRounds: Int = log.refRounds ?? 0
+            let ref: String = nonCourse ? RefSearch.statusFragment(count: refCount, rounds: refRounds, busy: refBusy) : ""
+            return base + ref
         }
         return ReviewText.status(done: doneCount, passed: passedCount, blocked: blockedCount, lastLatency: lastLatency, stop: stop)
     }
@@ -261,11 +272,17 @@ final class LiveReviewer {
     }
 
     /// v0.29.0：錄音中改主題（非課程）：之後送的卡片、重查、重算都用新的；記進改字紀錄（續錄讀得回）
+    /// v0.29.1：主題真的改了、而且已經搜尋過參照詞：60 秒後（再改就從頭等）重新搜尋一次（輪數照樣算進 3 輪）
     func setTopic(_ text: String?) {
         let cleaned = SessionTopic.clean(text)
+        let changed: Bool = cleaned != topic
         topic = cleaned
         log.topic = cleaned
         save()
+        let rounds: Int = log.refRounds ?? 0
+        if changed, nonCourse, rounds > 0 {
+            refTopicAt = Date().addingTimeInterval(RefSearch.topicDelay)
+        }
     }
 
     /// v0.29.0 錄音中複製用：這一段（續錄的新段）的卡；前幾段的字在續錄的 head 裡（和停止後的逐字稿同一個規則）
@@ -301,6 +318,7 @@ final class LiveReviewer {
         }
         sendNext()
         sendRefreshes()
+        checkReferences()
     }
 
     private func plan(_ units: [LiveUnit], now: Double) {
@@ -359,7 +377,9 @@ final class LiveReviewer {
             let raw = units.map(\.text).joined()
             // v0.27.0：這場使用者改過的字附在最後當參考（只這場，不存進任何詞表）
             // v0.29.0：非課程的主題（使用者寫的）放在改字對照、說明前面；每次請求都帶現在的主題
-            let userEdits = SessionTopic.promptBlock(topic) + CardEdits.promptBlock(cards.flatMap { $0.edits ?? [] })
+            // v0.29.1：非課程網路查到的參照詞接在主題後面（主題、參照詞、改字對照、說明各一段，不重複）
+            let refBlock: String = nonCourse ? RefSearch.promptBlock(log.refTerms ?? [], about: log.refAbout) : ""
+            let userEdits = SessionTopic.promptBlock(topic) + refBlock + CardEdits.promptBlock(cards.flatMap { $0.edits ?? [] })
             let message = CardPrompt.userMessage(context: batch.context, raw: raw, reference: reference, referenceName: referenceName,
                                                  userEdits: userEdits)
             Task {
@@ -734,14 +754,17 @@ final class LiveReviewer {
             item.state = .failed
             item.note = "Haiku 這場已停（\(stop.short)），沒有送"
         } else {
-            item.note = rechecksInFlight > 0 ? "排隊中…" : "上網查資料中…"
+            // v0.29.1：參照詞搜尋也在同一個隊伍
+            item.note = rechecksInFlight > 0 || refBusy ? "排隊中…" : "上網查資料中…"
         }
         card.rechecks = (card.rechecks ?? []) + [item]
         put(card)
         save()
         guard stop == nil else { return }
         onEvent("重查：第 \(cardID) 張卡圈了 \(texts.count) 行" + (others.isEmpty ? "" : "（跨 \(parts.count) 張卡）"))
-        let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts, nonCourse: nonCourse, topic: topic)
+        let refs: [RefTerm] = nonCourse ? (log.refTerms ?? []) : []
+        let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts, nonCourse: nonCourse, topic: topic,
+                                                references: refs)
         enqueueRecheck(cardID: cardID, recheckID: id, message: message)
     }
 
@@ -864,6 +887,112 @@ final class LiveReviewer {
         return result
     }
 
+    // MARK: v0.29.1 非課程：參照詞搜尋
+
+    /// 每秒（tick 最後）：只在非課程、卡片模式、錄音中、Haiku 沒停、有網路、沒有正在搜尋時看。
+    /// 要不要搜尋由 RefSearch.decide 決定（第一次＝錄音 5 分鐘；之後每 600 秒看最近的稿；改主題；3 輪、0.20 美元、失敗 3 次就停）
+    private func checkReferences() {
+        guard cardMode, nonCourse, !closed, !wrapped, feeding, stop == nil, online, !refBusy else { return }
+        let now = audioNow()
+        let topicDue: Bool = refTopicAt.map { (at: Date) -> Bool in Date() >= at } ?? false
+        let decision = RefSearch.decide(now: now, lastCheck: log.refLastCheck, rounds: log.refRounds ?? 0,
+                                        failures: log.refFailures ?? 0, spentUSD: log.refCostUSD ?? 0, topicChanged: topicDue,
+                                        terms: log.refTerms ?? [], readTexts: { self.referenceTexts() })
+        switch decision {
+        case .wait:
+            break
+        case .checked:
+            log.refLastCheck = now
+            save()
+        case .search(let why):
+            log.refLastCheck = now
+            refTopicAt = nil
+            enqueueReferenceSearch(why: why)
+        case .stopped(let reason):
+            refTopicAt = nil
+            if !refStopLogged {
+                refStopLogged = true
+                onEvent("參照詞：\(reason)，這場不再搜尋（卡片照常）")
+            }
+        }
+    }
+
+    /// 送出去的稿、最近那段（全部卡＋還沒進卡的字）
+    private func referenceTexts() -> (all: String, window: String) {
+        RefSearch.texts(cards: cards, tail: splitter.unsent)
+    }
+
+    /// 排進重查的隊伍（不同時查兩個）；不算進 rechecksInFlight（停止補送不等它）。稿和已知的參照詞輪到它時才取（用最新的）
+    private func enqueueReferenceSearch(why: String) {
+        refBusy = true
+        let previous = recheckChain
+        recheckChain = Task {
+            await previous?.value
+            if !self.closed, !self.wrapped, self.feeding, self.stop == nil {
+                await self.runReferenceSearch(why: why)
+            }
+            self.refBusy = false
+        }
+    }
+
+    /// 上網搜一次參照詞（和重查同一份 runWebSearch）。花費記在 refCostUSD（另計，不加進 costUSD、不停卡片）；
+    /// 拿到回應才算一輪；網路錯、4xx 記一行、算一次沒查到，下次檢查再試；卡片照常
+    private func runReferenceSearch(why: String) async {
+        let texts = referenceTexts()
+        guard !texts.all.isEmpty else { return }
+        let known: [RefTerm] = log.refTerms ?? []
+        let message = RefSearch.userMessage(transcript: texts.all, topic: topic, known: known)
+        let round: Int = (log.refRounds ?? 0) + 1
+        // 紀錄只寫字數、個數，不寫稿和詞
+        onEvent("參照詞：第 \(round) 輪搜尋（\(why)），送 \(texts.all.count) 字、已知 \(known.count) 個")
+        let result = await runWebSearch(system: RefSearch.system, message: message, label: "參照詞搜尋", keepTrying: false,
+                                        onNote: { (_: String) in },
+                                        onCost: { (usd: Double) in self.addReferenceCost(usd) })
+        if result.answered {
+            log.refRounds = round
+        }
+        if result.cancelled {
+            save()
+            return
+        }
+        if let failure = result.failure {
+            failReferenceSearch(failure, answered: result.answered)
+            return
+        }
+        let all = result.content
+        guard let reply = RefSearchReply.parse(RecheckPrompt.text(all)) else {
+            let error = RecheckPrompt.searchError(all).map { "（搜尋：\($0)）" } ?? ""
+            failReferenceSearch("回覆裡沒有規定的 JSON" + error, answered: result.answered)
+            return
+        }
+        let before: Int = known.count
+        let merged: [RefTerm] = RefSearch.merge(log.refTerms ?? [], reply.terms, replaced: reply.replaced)
+        log.refTerms = merged
+        if !reply.about.isEmpty {
+            log.refAbout = reply.about
+        }
+        log.refFailures = 0
+        save()
+        onEvent("參照詞：第 \(round) 輪找到 \(reply.terms.count) 個（原本 \(before) 個，現在 \(merged.count) 個）、搜尋 \(result.searches) 次、"
+            + String(format: "%.4f 美元（另計）", result.cost))
+    }
+
+    /// 沒拿到回應（網路錯、4xx）算一次沒查到；拿到回應卻讀不出來只記一行（已經算一輪）
+    private func failReferenceSearch(_ reason: String, answered: Bool) {
+        if !answered {
+            let failures: Int = (log.refFailures ?? 0) + 1
+            log.refFailures = failures
+        }
+        save()
+        onEvent("參照詞搜尋沒成功：\(reason)；卡片照常，下次檢查再試")
+    }
+
+    /// 參照詞搜尋的花費：只加在 refCostUSD（另計），不加進 costUSD（卡片的 1 美元上限不會因為搜尋停）
+    private func addReferenceCost(_ usd: Double) {
+        let spent: Double = (log.refCostUSD ?? 0) + usd
+        log.refCostUSD = spent
+    }
+
     private func updateRecheck(_ cardID: Int, _ recheckID: Int, _ change: (inout CardRecheck) -> Void) {
         guard var card = cards.first(where: { $0.id == cardID }), var list = card.rechecks,
               let k = list.firstIndex(where: { $0.id == recheckID }) else { return }
@@ -938,6 +1067,14 @@ final class LiveReviewer {
             entry.unsure = finalUnsure.isEmpty ? nil : finalUnsure
             entry.costUSD = cost
             entry.searches = searches
+        }
+        // v0.29.1 非課程：重查真的改進逐字稿的字也收進參照詞（不另外搜尋、不算輪數）
+        if nonCourse, cardMode, !applied.isEmpty {
+            let confirmed: [RefTerm] = RefSearch.fromRecheck(applied)
+            if !confirmed.isEmpty {
+                let merged: [RefTerm] = RefSearch.merge(log.refTerms ?? [], confirmed)
+                log.refTerms = merged
+            }
         }
         save()
         onEvent("重查完：第 \(cardID) 張卡改 \(applied.count) 處、待確認 \(guesses.count) 處、搜尋 \(searches) 次、" + String(format: "%.4f 美元", cost))
@@ -1025,8 +1162,9 @@ final class LiveReviewer {
             refreshing.remove(id)
             return
         }
+        let refs: [RefTerm] = nonCourse ? (log.refTerms ?? []) : []
         let message = CardRefresh.userMessage(transcript: transcript, notes: CardEdits.promptNotes(card.edits ?? []),
-                                              key: card.key, tidy: card.tidy, topic: topic)
+                                              key: card.key, tidy: card.tidy, topic: topic, references: refs)
         let block = CardRefresh.courseBlock(course: course, nonCourse: nonCourse)
         refreshRunning.insert(id)
         Task {

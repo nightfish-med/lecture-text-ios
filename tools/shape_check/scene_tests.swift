@@ -561,4 +561,178 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
         alsoMark = d.also == nil ? "nil" : "有"
     }
     check(alsoMark, "nil", "舊卡片.json：重查沒有 also 照讀")
+
+    // ---- v0.29.1 非課程：參照詞搜尋（詞、句子全是編的）
+    func refShow(_ d: RefDecision) -> String {
+        switch d {
+        case .wait: return "wait"
+        case .checked: return "checked"
+        case .search(let why): return "search:" + why
+        case .stopped(let why): return "stopped:" + why
+        }
+    }
+    func refList(_ terms: [RefTerm]) -> String {
+        terms.map { (t: RefTerm) -> String in t.term + ":" + t.note }.joined(separator: "/")
+    }
+
+    // 回覆解析
+    let refReplyText: String = "查到了。\n```json\n{\"about\": \"一場談甲乙丙書店的分享\", \"terms\": [{\"term\": \"甲乙丙書店\", \"note\": \"書店名\"}, {\"term\": \"  \", \"note\": \"空的不算\"}, {\"term\": \"丁戊法則\", \"note\": \"術語\", \"replaces\": \"丁午法則\"}]}\n```"
+    let refReply: RefSearchReply? = RefSearchReply.parse(refReplyText)
+    let refReplyTerms: String = refReply.map { (r: RefSearchReply) -> String in refList(r.terms) } ?? "nil"
+    let refReplyAbout: String = refReply?.about ?? "nil"
+    let refReplyReplaced: String = (refReply?.replaced ?? []).joined(separator: "/")
+    check(refReplyTerms + "|" + refReplyAbout + "|" + refReplyReplaced, "甲乙丙書店:書店名/丁戊法則:術語|一場談甲乙丙書店的分享|丁午法則",
+          "參照詞回覆：讀最後的 JSON、空的詞不算、更正記下舊寫法")
+    check(RefSearchReply.parse("沒有 JSON") == nil ? "nil" : "有", "nil", "參照詞回覆：沒有 JSON＝讀不出")
+    let longNote: String = String(repeating: "說", count: 40)
+    let longReplyText: String = "{\"terms\": [{\"term\": \"庚辛\", \"note\": \"" + longNote + "\"}]}"
+    let longReplyNote: Int = RefSearchReply.parse(longReplyText)?.terms.first?.note.count ?? -1
+    let longReplyAbout: String = RefSearchReply.parse(longReplyText)?.about ?? "nil"
+    check("\(longReplyNote)|" + longReplyAbout, "24|", "參照詞回覆：說明截到 24 字、沒有 about 給空字串")
+
+    // 合併：新的在前、同一個詞新的蓋掉舊的（不分大小寫、空白）、被更正的舊寫法拿掉、最多 30 個
+    let refOld: [RefTerm] = [RefTerm(term: "Kappa 站", note: "舊"), RefTerm(term: "乙丙", note: "b"), RefTerm(term: "丁午法則", note: "x")]
+    let refNew: [RefTerm] = [RefTerm(term: "kappa站", note: "新"), RefTerm(term: "丁戊法則", note: "術語")]
+    let refMerged: [RefTerm] = RefSearch.merge(refOld, refNew, replaced: ["丁午法則"])
+    check(refList(refMerged), "kappa站:新/丁戊法則:術語/乙丙:b", "參照詞合併：新的在前、同詞新的蓋掉舊的、更正的舊寫法拿掉")
+    let manyOld: [RefTerm] = (1...25).map { (i: Int) -> RefTerm in RefTerm(term: "舊詞\(i)", note: "") }
+    let manyNew: [RefTerm] = (1...10).map { (i: Int) -> RefTerm in RefTerm(term: "新詞\(i)", note: "") }
+    let manyMerged: [RefTerm] = RefSearch.merge(manyOld, manyNew)
+    let manyFirst: String = manyMerged.first?.term ?? "nil"
+    let manyLast: String = manyMerged.last?.term ?? "nil"
+    check("\(manyMerged.count)|" + manyFirst + "|" + manyLast, "30|新詞1|舊詞20", "參照詞合併：最多 30 個、太多丟最舊的")
+    let dupNew: [RefTerm] = [RefTerm(term: "壬癸", note: "一"), RefTerm(term: "壬 癸", note: "二")]
+    check(refList(RefSearch.merge([], dupNew)), "壬癸:一", "參照詞合併：同一次回覆重複的只留第一個")
+
+    // 最近那段稿一個參照詞都沒出現才重新搜尋
+    let filler: String = String(repeating: "甲", count: 300)
+    let shortWindow: String = String(repeating: "甲", count: 299)
+    let kappa: [RefTerm] = [RefTerm(term: "Kappa站", note: "")]
+    let staleShort: Bool = RefSearch.stale(terms: [], window: shortWindow)
+    let staleEmpty: Bool = RefSearch.stale(terms: [], window: filler)
+    let staleHit: Bool = RefSearch.stale(terms: kappa, window: filler + "KAPPA站")
+    let staleMiss: Bool = RefSearch.stale(terms: kappa, window: filler)
+    check("\(staleShort)|\(staleEmpty)|\(staleHit)|\(staleMiss)", "false|true|false|true",
+          "參照詞：最近那段不到 300 字不算、沒參照詞且字夠就搜、出現一個（不分大小寫）就不搜、都沒出現才搜")
+
+    // 輪數、花費、失敗的上限
+    let capNone: String = RefSearch.capReason(rounds: 2, failures: 2, spentUSD: 0.19) ?? "nil"
+    let capRounds: String = RefSearch.capReason(rounds: 3, failures: 0, spentUSD: 0) ?? "nil"
+    let capCost: String = RefSearch.capReason(rounds: 1, failures: 0, spentUSD: 0.20) ?? "nil"
+    let capFail: String = RefSearch.capReason(rounds: 0, failures: 3, spentUSD: 0) ?? "nil"
+    check(capNone, "nil", "參照詞上限：2 輪、0.19 美元、失敗 2 次還可以搜")
+    check(capRounds + "|" + capCost + "|" + capFail, "這場搜尋 3 輪到上限|這場搜尋花費到上限 0.20 美元|連續沒查到 3 次", "參照詞上限：3 輪、0.20 美元、失敗 3 次")
+
+    // 每秒的決定
+    var refReads = 0
+    let longText: (all: String, window: String) = (all: String(repeating: "甲", count: 120), window: filler)
+    let shortText: (all: String, window: String) = (all: String(repeating: "甲", count: 50), window: "")
+    let d1: RefDecision = RefSearch.decide(now: 299, lastCheck: nil, rounds: 0, failures: 0, spentUSD: 0, topicChanged: false, terms: [],
+                                           readTexts: { refReads += 1; return longText })
+    check(refShow(d1) + "|\(refReads)", "wait|0", "參照詞決定：不到 5 分鐘不搜、也不讀稿")
+    let d2: RefDecision = RefSearch.decide(now: 300, lastCheck: nil, rounds: 0, failures: 0, spentUSD: 0, topicChanged: false, terms: [],
+                                           readTexts: { longText })
+    let d3: RefDecision = RefSearch.decide(now: 900, lastCheck: nil, rounds: 0, failures: 0, spentUSD: 0, topicChanged: false, terms: [],
+                                           readTexts: { shortText })
+    check(refShow(d2) + "|" + refShow(d3), "search:錄音 5 分鐘|wait", "參照詞決定：5 分鐘有字就搜第一次，字太少先等")
+    let d4: RefDecision = RefSearch.decide(now: 899, lastCheck: 300, rounds: 1, failures: 0, spentUSD: 0.03, topicChanged: false, terms: kappa,
+                                           readTexts: { longText })
+    let d5: RefDecision = RefSearch.decide(now: 900, lastCheck: 300, rounds: 1, failures: 0, spentUSD: 0.03, topicChanged: false, terms: kappa,
+                                           readTexts: { longText })
+    let hitText: (all: String, window: String) = (all: "", window: filler + "kappa站")
+    let d6: RefDecision = RefSearch.decide(now: 900, lastCheck: 300, rounds: 1, failures: 0, spentUSD: 0.03, topicChanged: false, terms: kappa,
+                                           readTexts: { hitText })
+    check(refShow(d4) + "|" + refShow(d5) + "|" + refShow(d6), "wait|search:最近 10 分鐘的稿沒講到參照詞|checked",
+          "參照詞決定：600 秒後才看、沒講到參照詞就重搜、講到就只記檢查時間")
+    let d7: RefDecision = RefSearch.decide(now: 310, lastCheck: 300, rounds: 1, failures: 0, spentUSD: 0.03, topicChanged: true, terms: kappa,
+                                           readTexts: { hitText })
+    let d8: RefDecision = RefSearch.decide(now: 310, lastCheck: 300, rounds: 0, failures: 1, spentUSD: 0, topicChanged: true, terms: [],
+                                           readTexts: { hitText })
+    check(refShow(d7) + "|" + refShow(d8), "search:改了主題|wait", "參照詞決定：搜過之後改主題就搜一次（還沒搜成過不算）")
+    let d9: RefDecision = RefSearch.decide(now: 2000, lastCheck: 300, rounds: 3, failures: 0, spentUSD: 0.05, topicChanged: true, terms: [],
+                                           readTexts: { longText })
+    let d10: RefDecision = RefSearch.decide(now: 2000, lastCheck: 300, rounds: 1, failures: 0, spentUSD: 0.21, topicChanged: false, terms: [],
+                                            readTexts: { longText })
+    check(refShow(d9) + "|" + refShow(d10), "stopped:這場搜尋 3 輪到上限|stopped:這場搜尋花費到上限 0.20 美元", "參照詞決定：3 輪或 0.20 美元就不再搜")
+
+    // 送出去的稿：全部卡＋還沒進卡的字；最近那段以最後一個字往回 600 秒
+    let refCardA = LiveCard(id: 1, start: 0, end: 60, raw: "甲甲")
+    var refCardB = LiveCard(id: 2, start: 700, end: 760, raw: "乙午")
+    refCardB.state = .done
+    refCardB.expanded = "乙乙"
+    let refTail: [LiveUnit] = [LiveUnit(id: 9, text: "丙", start: 770, end: 775, offsetStart: 0, offsetEnd: 1)]
+    let refTexts: (all: String, window: String) = RefSearch.texts(cards: [refCardB, refCardA], tail: refTail)
+    check(refTexts.all + "#" + refTexts.window, "甲甲\n乙乙\n丙#乙乙\n丙", "參照詞的稿：卡照時間、整理到的用改好的字、最近那段只到 600 秒前")
+    let bigCard = LiveCard(id: 3, start: 0, end: 60, raw: String(repeating: "甲", count: 7000))
+    let bigTexts: (all: String, window: String) = RefSearch.texts(cards: [bigCard], tail: [])
+    check("\(bigTexts.all.count)", "6000", "參照詞的稿：最多送最後 6000 字")
+
+    // 訊息：參照詞和主題、改字對照、說明各自一段
+    let book: [RefTerm] = [RefTerm(term: "甲乙丙書店", note: "書店名")]
+    check(RefSearch.promptBlock([], about: nil), "", "參照詞：沒有就不放")
+    let refBlock: String = RefSearch.promptBlock(book, about: "一場分享")
+    let refBlockOK: Bool = refBlock.hasPrefix("\n\n網路查到的參照詞") && refBlock.hasSuffix("\n這場大概在講（搜尋整理的）：一場分享\n甲乙丙書店（書店名）")
+    check(refBlockOK ? "對" : refBlock, "對", "參照詞：卡片訊息多一段（搜尋整理的一句＋一詞一行）")
+    let refCardMessage: String = CardPrompt.userMessage(context: "", raw: "這段", reference: "", referenceName: "Apple",
+                                                        userEdits: SessionTopic.promptBlock("社團分享會") + refBlock)
+    let topicAt: Int = refCardMessage.range(of: "使用者說這場的主題")?.lowerBound.utf16Offset(in: refCardMessage) ?? -1
+    let refAt: Int = refCardMessage.range(of: "網路查到的參照詞")?.lowerBound.utf16Offset(in: refCardMessage) ?? -1
+    check(topicAt >= 0 && refAt > topicAt ? "對" : refCardMessage, "對", "參照詞：接在主題後面，主題和參照詞分開兩段")
+    let refRecheck: String = RecheckPrompt.userMessage(course: "", key: "", lines: ["甲句"], nonCourse: true, topic: "社團分享會", references: book)
+    check(refRecheck.contains("社團分享會\n網路查到的參照詞（之前搜尋整理的，只當參考）：甲乙丙書店（書店名）\n這段的重點：") ? "對" : refRecheck, "對",
+          "參照詞：重查訊息多一行（主題後面）")
+    let refRefresh: String = CardRefresh.userMessage(transcript: ["甲。"], notes: [], key: "", tidy: "", topic: "社團分享會", references: book)
+    check(refRefresh.hasPrefix("這場的主題（使用者自己寫的）：社團分享會\n\n網路查到的參照詞（之前搜尋整理的，只當參考）：甲乙丙書店（書店名）\n\n這張卡修正後的逐字稿") ? "對" : refRefresh,
+          "對", "參照詞：重算訊息多一行（主題後面）")
+    let searchMessage: String = RefSearch.userMessage(transcript: "稿", topic: "社團分享會", known: book)
+    let searchMessageOK: Bool = searchMessage.hasPrefix("主題（使用者自己寫的）：社團分享會\n\n已經找到的參照詞")
+        && searchMessage.contains("甲乙丙書店（書店名）") && searchMessage.hasSuffix("只用來查）：\n稿")
+    check(searchMessageOK ? "對" : searchMessage, "對", "參照詞搜尋訊息：主題、已經找到的（叫它不要再列）、稿")
+    let firstSearch: String = RefSearch.userMessage(transcript: "稿", topic: nil, known: [])
+    check(firstSearch.contains("已經找到") || firstSearch.contains("主題") ? firstSearch : "對", "對", "參照詞搜尋訊息：第一次沒有已知、沒主題就不放")
+    let refSystemWords: [String] = ["不要猜", "最多 30 個", "replaces", "已經找到的參照詞"]
+    let refSystemMissing: [String] = refSystemWords.filter { (word: String) -> Bool in !RefSearch.system.contains(word) }
+    check(refSystemMissing.joined(separator: "、"), "", "參照詞搜尋提示詞：查不到不列、最多 30 個、已知的不再列")
+    let cardRefMissing: Bool = !CardPrompt.system.contains("網路查到的參照詞")
+    check(cardRefMissing ? "沒有" : "有", "有", "卡片提示詞：講明參照詞只當參考")
+
+    // 請求：和重查同一份（Haiku＋網路搜尋最多 3 次），只換 system
+    if let body = try? RecheckPrompt.body(userMessage: "稿", assistant: nil, system: RefSearch.system),
+       let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any],
+       let tools = object["tools"] as? [[String: Any]], let tool = tools.first {
+        let systemSame: Bool = (object["system"] as? String) == RefSearch.system
+        check("\(systemSame)|\(tool["name"] ?? "")|\(tool["max_uses"] ?? "")", "true|web_search|3", "參照詞請求：和重查同一份請求、只換提示詞")
+    } else {
+        check("編不出來", "編得出來", "參照詞請求：編得出來")
+    }
+
+    // Pencil 重查改進逐字稿的字也收進參照詞（不另外搜尋）
+    let fromFixes: [RefTerm] = RefSearch.fromRecheck([RecheckFix(old: "丁午", new: "丁戊法則"), RecheckFix(old: "乙", new: "  "),
+                                                      RecheckFix(old: "丙", new: String(repeating: "丙", count: 31))])
+    check(refList(fromFixes), "丁戊法則:Pencil 重查確認", "參照詞：重查改的字收進來（空的、太長的不收）")
+
+    // 狀態列
+    let fragBusy: String = RefSearch.statusFragment(count: 3, rounds: 1, busy: true)
+    let fragNone: String = RefSearch.statusFragment(count: 0, rounds: 0, busy: false)
+    let fragSome: String = RefSearch.statusFragment(count: 5, rounds: 1, busy: false)
+    check(fragBusy + "|" + fragNone + "|" + fragSome, "・參照詞搜尋中||・參照詞 5 個", "參照詞狀態列：搜尋中、還沒搜不寫、找到幾個")
+
+    // 改字紀錄：存得進去、舊檔讀得開；摘要一行只寫個數、花費另計
+    var refLog = ReviewLog(course: "")
+    refLog.costUSD = 0.5
+    refLog.refTerms = book + [RefTerm(term: "丁戊法則", note: "術語")]
+    refLog.refAbout = "一場分享"
+    refLog.refRounds = 1
+    refLog.refCostUSD = 0.04
+    refLog.refLastCheck = 300
+    let refLogData: Data? = try? JSONEncoder().encode(refLog)
+    let refLogBack: ReviewLog? = refLogData.flatMap { (d: Data) -> ReviewLog? in try? JSONDecoder().decode(ReviewLog.self, from: d) }
+    check(refLogBack == refLog ? "一樣" : "不一樣", "一樣", "改字紀錄：參照詞、輪數、花費、檢查時間存得進去也讀得回來")
+    let oldLog: ReviewLog? = try? JSONDecoder().decode(ReviewLog.self, from: Data("{\"course\": \"\"}".utf8))
+    let oldLogRef: String = oldLog.map { (l: ReviewLog) -> String in l.refTerms == nil && l.refRounds == nil && l.refCostUSD == nil ? "nil" : "有" } ?? "讀不開"
+    check(oldLogRef, "nil", "舊改字紀錄：沒有參照詞欄位照讀")
+    let refSummary: String = refLog.summaryLine
+    let refSummaryOK: Bool = refSummary.contains("約 0.500 美元") && refSummary.contains("參照詞 2 個（搜尋 1 輪、約 0.040 美元另計）")
+        && !refSummary.contains("甲乙丙書店") && !refSummary.contains("一場分享")
+    check(refSummaryOK ? "對" : refSummary, "對", "改字紀錄摘要：參照詞只寫個數、輪數、花費另計，不寫詞")
 }

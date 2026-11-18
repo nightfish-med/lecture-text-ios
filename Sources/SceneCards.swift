@@ -647,6 +647,7 @@ enum RecheckPrompt {
     - fixes 和 maybe 的 old 要短（只放聽錯的那個詞），一定要在圈起來的行裡逐字找得到；同一處只放其中一邊。
     - unsure 只寫文字說明（哪裡查不到、為什麼沒把握），不要在這裡放改法。
     - sources 只放真的支持結論的網址；沒有就給空陣列。和結論無關的搜尋結果不要列。
+    - 訊息裡有「網路查到的參照詞」時，那是之前搜尋整理的，可以當線索，但這次還是要自己查證，不能只憑它就改。
     """
 
     static func webSearchTool() -> [String: Any] {
@@ -661,11 +662,14 @@ enum RecheckPrompt {
     /// 使用者訊息：課名（沒有就寫討論會）、這張卡的重點、圈起來的行（不送整份逐字稿）
     /// v0.28.0：重點是固定字樣（聽不清、現場口令）也當沒有重點
     /// v0.29.0：nonCourse＝非課程（沒課名時寫非課程，不寫討論會）；topic＝使用者寫的主題（有才多一行）
-    static func userMessage(course: String, key: String, lines: [String], nonCourse: Bool = false, topic: String? = nil) -> String {
+    /// v0.29.1：references＝非課程網路查到的參照詞（有才多一行，接在主題後面）
+    static func userMessage(course: String, key: String, lines: [String], nonCourse: Bool = false, topic: String? = nil,
+                            references: [RefTerm] = []) -> String {
         let name = course.isEmpty ? RecordScene.noCourseName(nonCourse: nonCourse) : course
         let point = key.isEmpty || CardText.isPlaceholderKey(key) ? "（還沒有）" : key
         let topicLine: String = SessionTopic.clean(topic).map { (t: String) -> String in "主題（使用者自己寫的）：" + t + "\n" } ?? ""
-        return "課名：\(name)\n" + topicLine + "這段的重點：\(point)\n\n圈起來的逐字稿（一行一句）：\n" + lines.joined(separator: "\n")
+        let refLine: String = RefSearch.inline(references)
+        return "課名：\(name)\n" + topicLine + refLine + "這段的重點：\(point)\n\n圈起來的逐字稿（一行一句）：\n" + lines.joined(separator: "\n")
     }
 
     /// 請求內容（JSONSerialization 編，pause_turn 時把上一段回應的 content 原封不動放成 assistant）
@@ -881,6 +885,228 @@ enum RecheckPrompt {
     }
 }
 
+// MARK: - v0.29.1 非課程：錄音 5 分鐘後上網找參照詞
+
+/// 一個參照詞（網路搜尋整理的專有名詞：人名、書名、地名、機構、術語）和一句短說明。存在改字紀錄（續錄讀得回）
+struct RefTerm: Codable, Equatable {
+    var term: String
+    var note: String
+}
+
+/// 參照詞搜尋回覆最後那個 JSON。replaced＝這次更正掉的舊寫法（合併時拿掉）
+struct RefSearchReply: Equatable {
+    var about: String
+    var terms: [RefTerm]
+    var replaced: [String] = []
+
+    /// 找最後一個有 terms 或 about 的 JSON 物件（和重查同一個找法）；詞、說明在這裡就截短、去空白
+    static func parse(_ text: String) -> RefSearchReply? {
+        guard let object = RecheckReply.lastObject(text, keys: ["terms", "about"]) else { return nil }
+        var terms: [RefTerm] = []
+        var replaced: [String] = []
+        for item in (object["terms"] as? [Any] ?? []) {
+            guard let d = item as? [String: Any] else { continue }
+            guard let term = RefSearch.clean(d["term"] as? String, limit: RefSearch.maxTermLength) else { continue }
+            let note: String = RefSearch.clean(d["note"] as? String, limit: RefSearch.maxNoteLength) ?? ""
+            terms.append(RefTerm(term: term, note: note))
+            if let old = RefSearch.clean(d["replaces"] as? String, limit: RefSearch.maxTermLength) {
+                replaced.append(old)
+            }
+        }
+        let about: String = RefSearch.clean(object["about"] as? String, limit: RefSearch.maxAboutLength) ?? ""
+        return RefSearchReply(about: about, terms: terms, replaced: replaced)
+    }
+}
+
+/// 參照詞搜尋要不要做（每秒看一次）
+enum RefDecision: Equatable {
+    /// 還不到時間
+    case wait
+    /// 到了檢查時間，但最近的稿還講得到參照詞（或字太少）：不搜尋，下次 600 秒後再看
+    case checked
+    /// 搜尋（原因寫進紀錄）
+    case search(String)
+    /// 這場不再搜尋（原因只記一次）
+    case stopped(String)
+}
+
+/// v0.29.1 非課程（其他場合）：錄音累積 5 分鐘、有字了，上網搜尋一次「參照詞」；之後每 600 秒看最近 600 秒的稿，
+/// 一個參照詞都沒出現（而且那段有 300 字以上）才重新搜尋；改主題後 60 秒搜一次。一場最多 3 輪、搜尋花費最多 0.20 美元。
+/// 和 Pencil 重查共用同一份上網的請求（RecheckPrompt.body、parse、cost），排同一個隊伍（不同時查兩個）。
+/// 參照詞每次送卡片、重查、重算時附在使用者訊息（和主題同一個管道，不放進有快取的課程區塊）。
+enum RefSearch {
+    /// 第一次：錄音秒數到這裡（含續錄位移）
+    static let firstAt = 300.0
+    /// 第一次至少要有幾個字
+    static let firstMinChars = 100
+    /// 之後每隔幾秒（錄音秒數）看一次最近這麼長的稿
+    static let every = 600.0
+    /// 那段至少要有幾個字才算「有在講話」
+    static let minWindowChars = 300
+    static let maxRounds = 3
+    /// 沒拿到回應（網路錯、4xx）幾次就這場不再搜尋（這種失敗不算輪數）
+    static let maxFailures = 3
+    static let maxTerms = 30
+    /// 這場參照詞搜尋的花費上限（美元）；另計，不算進卡片的 1 美元上限
+    static let capUSD = 0.20
+    /// 改主題後等幾秒（牆上時間；再改就從頭等）
+    static let topicDelay = 60.0
+    /// 送出去的逐字稿最多幾個字（取最後面的）
+    static let maxInput = 6000
+    static let maxTermLength = 30
+    static let maxNoteLength = 24
+    static let maxAboutLength = 60
+
+    static let system = """
+    你幫忙替一場錄音整理「參照詞」，讓之後整理逐字稿時專有名詞寫得對。使用者給你這場到目前為止的語音辨識逐字稿（Whisper，常把專有名詞聽成同音字），可能還有使用者自己寫的主題。
+    請用網路搜尋查這場在講什麼，找出講者講到的專有名詞（人名、書名、地名、機構、術語）的正確寫法。逐字稿只用來查，不要改寫、不要摘要逐字稿。
+    回答用繁體中文（台灣用語），最後一定要附一個 JSON 物件（整個回答只放這一個，放在最後）：
+    {"about": "一句話：這場大概在講什麼（查不到就空字串）", "terms": [{"term": "正確寫法", "note": "10 字內：它是什麼", "replaces": "更正的舊寫法；不是更正就空字串"}]}
+    規則：
+    - 只列搜尋結果真的支持、而且逐字稿裡講到（或聽成同音字）的詞。不要猜；查不到就不列，寧可少列。
+    - 最多 30 個；一般常見的詞不要列。
+    - 有「已經找到的參照詞」時，那些不要再列；只列新的，或寫法要更正的（照新寫法列，replaces 放舊寫法）。
+    - note 只寫它是什麼（例如「人名」「書名」「地名」「術語」加幾個字），不要寫逐字稿的內容。
+    """
+
+    /// 換行變空白、去頭尾空白、截到 limit；空的＝nil
+    static func clean(_ text: String?, limit: Int) -> String? {
+        guard let text else { return nil }
+        let flat: String = text.components(separatedBy: CharacterSet.newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return flat.isEmpty ? nil : String(flat.prefix(limit))
+    }
+
+    /// 比對同一個詞：小寫、去掉空白
+    static func key(_ term: String) -> String {
+        term.lowercased().filter { (c: Character) -> Bool in !c.isWhitespace }
+    }
+
+    /// 合併：新的在前（同一個詞新的說明蓋掉舊的）、去重複；被更正掉的舊寫法拿掉；最多 maxTerms 個（太多丟最舊的）
+    static func merge(_ old: [RefTerm], _ new: [RefTerm], replaced: [String] = []) -> [RefTerm] {
+        let gone: Set<String> = Set(replaced.map { (r: String) -> String in RefSearch.key(r) })
+        var seen = Set<String>()
+        var out: [RefTerm] = []
+        for item in new + old {
+            let k: String = RefSearch.key(item.term)
+            if k.isEmpty || seen.contains(k) { continue }
+            if gone.contains(k) && !new.contains(where: { (n: RefTerm) -> Bool in RefSearch.key(n.term) == k }) { continue }
+            seen.insert(k)
+            out.append(item)
+            if out.count >= maxTerms { break }
+        }
+        return out
+    }
+
+    /// 最近那段稿裡一個參照詞都沒出現（不分大小寫的子字串比對），而且那段有 minWindowChars 字以上＝話題換了，要重新搜尋。
+    /// 還沒有任何參照詞時，只要那段字夠多就算
+    static func stale(terms: [RefTerm], window: String) -> Bool {
+        guard window.count >= minWindowChars else { return false }
+        let lower = window.lowercased()
+        return !terms.contains { (t: RefTerm) -> Bool in
+            let k = t.term.lowercased()
+            return !k.isEmpty && lower.contains(k)
+        }
+    }
+
+    /// 這場還能不能搜尋：nil＝可以；否則是原因（只記一次）
+    static func capReason(rounds: Int, failures: Int, spentUSD: Double) -> String? {
+        if rounds >= maxRounds { return "這場搜尋 \(maxRounds) 輪到上限" }
+        if spentUSD >= capUSD { return "這場搜尋花費到上限 " + String(format: "%.2f", capUSD) + " 美元" }
+        if failures >= maxFailures { return "連續沒查到 \(maxFailures) 次" }
+        return nil
+    }
+
+    /// 每秒看一次。now＝錄音秒數（含續錄位移）；lastCheck＝上次搜尋或檢查的錄音秒數（nil＝還沒搜尋過）；
+    /// topicChanged＝改主題後等夠了；readTexts 只在真的要看稿時才叫（all＝送出去的稿、window＝最近 every 秒的稿）
+    static func decide(now: Double, lastCheck: Double?, rounds: Int, failures: Int, spentUSD: Double, topicChanged: Bool,
+                       terms: [RefTerm], readTexts: () -> (all: String, window: String)) -> RefDecision {
+        if let reason = capReason(rounds: rounds, failures: failures, spentUSD: spentUSD) {
+            return .stopped(reason)
+        }
+        guard let lastCheck else {
+            guard now >= firstAt else { return .wait }
+            return readTexts().all.count >= firstMinChars ? .search("錄音 5 分鐘") : .wait
+        }
+        if topicChanged && rounds > 0 {
+            return .search("改了主題")
+        }
+        guard now - lastCheck >= every else { return .wait }
+        let window: String = readTexts().window
+        return stale(terms: terms, window: window) ? .search("最近 10 分鐘的稿沒講到參照詞") : .checked
+    }
+
+    /// 送出去的稿：全部卡（照時間；整理到的用改好的字、沒整理的用原稿）＋還沒進卡的字，取最後 maxInput 字；
+    /// window＝最近 every 秒（以最後一個字的時間往回算）的卡＋還沒進卡的字
+    static func texts(cards: [LiveCard], tail: [LiveUnit]) -> (all: String, window: String) {
+        let sorted: [LiveCard] = cards.sorted { (a: LiveCard, b: LiveCard) -> Bool in a.start < b.start }
+        let tailText: String = tail.map(\.text).joined()
+        let cardEnd: Double = sorted.last?.end ?? 0
+        let tailEnd: Double = tail.last?.end ?? 0
+        let last: Double = max(cardEnd, tailEnd)
+        let all: String = sorted.map(\.transcriptText).joined(separator: "\n") + "\n" + tailText
+        let recent: [LiveCard] = sorted.filter { (c: LiveCard) -> Bool in c.end > last - every }
+        let window: String = recent.map(\.transcriptText).joined(separator: "\n") + "\n" + tailText
+        let trimmedAll: String = all.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedWindow: String = window.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (String(trimmedAll.suffix(maxInput)), trimmedWindow)
+    }
+
+    /// 參照詞搜尋的使用者訊息：主題（有才放）、已經找到的參照詞（有才放，叫它不要再列）、這場到目前為止的稿
+    static func userMessage(transcript: String, topic: String?, known: [RefTerm]) -> String {
+        var text: String = SessionTopic.clean(topic).map { (t: String) -> String in "主題（使用者自己寫的）：" + t + "\n\n" } ?? ""
+        if !known.isEmpty {
+            let knownLines: String = known.map { (t: RefTerm) -> String in RefSearch.line(t) }.joined(separator: "\n")
+            text += "已經找到的參照詞（不要再列；只列新的、或寫法要更正的）：\n" + knownLines + "\n\n"
+        }
+        return text + "這場到目前為止的逐字稿（語音辨識，可能有同音錯字；只用來查）：\n" + transcript
+    }
+
+    /// 一個詞一行：詞（說明）
+    static func line(_ t: RefTerm) -> String {
+        t.note.isEmpty ? t.term : t.term + "（" + t.note + "）"
+    }
+
+    static let head = "網路查到的參照詞（這場前面的稿上網搜尋整理的，不是使用者說的；只當改字的參考：原稿的字和參照詞發音相近、上下文也合才照參照詞寫，沒講到的詞不要寫進 expanded，括號裡的說明不要抄進 expanded、tidy、key）："
+
+    /// 卡片使用者訊息後面接的一段（沒有參照詞＝空字串）；接在主題後面、改字對照前面
+    static func promptBlock(_ terms: [RefTerm], about: String?) -> String {
+        let summary: String? = clean(about, limit: maxAboutLength)
+        guard !terms.isEmpty || summary != nil else { return "" }
+        var out = "\n\n" + head
+        if let summary {
+            out += "\n這場大概在講（搜尋整理的）：" + summary
+        }
+        for t in terms {
+            out += "\n" + RefSearch.line(t)
+        }
+        return out
+    }
+
+    /// 重查、重算訊息用的一行（沒有參照詞＝空字串）
+    static func inline(_ terms: [RefTerm]) -> String {
+        guard !terms.isEmpty else { return "" }
+        let joined: String = terms.map { (t: RefTerm) -> String in RefSearch.line(t) }.joined(separator: "、")
+        return "網路查到的參照詞（之前搜尋整理的，只當參考）：" + joined + "\n"
+    }
+
+    /// Pencil 重查真的改進逐字稿的字，也收進參照詞（不另外搜尋）；太長的不收
+    static func fromRecheck(_ fixes: [RecheckFix]) -> [RefTerm] {
+        fixes.compactMap { (fix: RecheckFix) -> RefTerm? in
+            let text: String = fix.new.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, text.count <= maxTermLength else { return nil }
+            return RefTerm(term: text, note: "Pencil 重查確認")
+        }
+    }
+
+    /// 狀態列的一小段：搜尋中、或找到幾個（還沒搜尋過＝空字串）
+    static func statusFragment(count: Int, rounds: Int, busy: Bool) -> String {
+        if busy { return "・參照詞搜尋中" }
+        guard rounds > 0 || count > 0 else { return "" }
+        return "・參照詞 \(count) 個"
+    }
+}
+
 // MARK: - v0.28.0 逐字稿改了之後重算重點、整理版
 
 /// 重算回覆（JSON）
@@ -927,6 +1153,7 @@ enum CardRefresh {
     講話的人不一定是老師：可能是學長姐、助教、上台報告的同學或來賓。看不出是誰就寫「講者」或不寫主詞，不要一律寫「老師」。
     課名是使用者自己選的（寫「沒有課名」就不管）。這堂的主題以課名為準，不要因為稿裡某個詞、或使用者改過的某個字，就改判成別的主題。非課程的場合有「這場的主題」時，主題以它為準。
     「使用者的說明」是使用者給你的話：照著做（你這裡不能上網查，查不到就不要假裝查過），但不要把說明的字抄進 key、tidy。
+    「網路查到的參照詞」是之前搜尋整理的專有名詞，只當寫法的參考：逐字稿沒講到的詞不要寫進 key、tidy，括號裡的說明也不要抄。
     tidy：2–4 句通順中文，只寫講者真的講到的。整段聽不清，或只是現場口令（喊口號、拍照、點名）、雜聲，就只寫（這段聽不清）或（現場口令），不要編成像真的內容。只有一部分是這樣：只整理有內容的部分。
     key：一句重點，15 字內，只寫這段真的講到的內容。整段聽不清，或只是現場口令、雜聲，key 就寫（這段聽不清）或（現場口令），不要從口令或雜聲編出重點。
     """
@@ -941,8 +1168,14 @@ enum CardRefresh {
 
     /// 使用者訊息：改好的逐字稿（一句一行）、使用者的說明（有才放）、原本的重點和整理版（固定字樣照寫，讓它知道原本是聽不清）
     /// v0.29.0：topic＝非課程時使用者寫的主題（有才放在最前面；主題錄音中可以改，所以不放 system）
-    static func userMessage(transcript: [String], notes: [String], key: String, tidy: String, topic: String? = nil) -> String {
+    /// v0.29.1：references＝非課程網路查到的參照詞（有才放，接在主題後面）
+    static func userMessage(transcript: [String], notes: [String], key: String, tidy: String, topic: String? = nil,
+                            references: [RefTerm] = []) -> String {
         var text: String = SessionTopic.clean(topic).map { (t: String) -> String in "這場的主題（使用者自己寫的）：" + t + "\n\n" } ?? ""
+        let refLine: String = RefSearch.inline(references)
+        if !refLine.isEmpty {
+            text += refLine + "\n"
+        }
         text += "這張卡修正後的逐字稿（一句一行，這是準的）：\n" + transcript.joined(separator: "\n")
         if !notes.isEmpty {
             text += "\n\n使用者的說明（照著做，但不要抄進 key、tidy）：\n" + notes.joined(separator: "\n")

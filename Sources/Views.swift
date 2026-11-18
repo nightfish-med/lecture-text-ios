@@ -233,6 +233,12 @@ private struct RecordingView: View {
         VStack(spacing: 0) {
             content
         }
+        // v0.29.0 診斷：錄音畫面大小變了記一行（Model 裡 1 秒內只記最後一個）
+        .onGeometryChange(for: CGSize.self) { proxy in
+            proxy.size
+        } action: { size in
+            model.noteRecordingSize(size)
+        }
         .overlay(alignment: .bottomTrailing) {
             // v0.29.0：複製鈕回來，和停止鈕並排（左複製、右停止，一樣大；不疊上下，iPad 視窗最矮約 100 點）
             HStack(spacing: short ? 8 : 12) {

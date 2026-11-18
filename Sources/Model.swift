@@ -243,6 +243,10 @@ final class AppModel {
     @ObservationIgnored private var watchTask: Task<Void, Never>?
     /// 這段真的開始收音的時間（牆上時間從這裡算）。
     @ObservationIgnored private var partStartedAt: Date?
+    /// v0.29.0 診斷：錄音畫面大小（點）上次記的值、時間；連續變的時候 1 秒內只記最後一個
+    @ObservationIgnored private var sizeLogged: CGSize?
+    @ObservationIgnored private var sizeLoggedAt = Date.distantPast
+    @ObservationIgnored private var sizeTask: Task<Void, Never>?
     @ObservationIgnored private var lastRecoverTry = Date.distantPast
     /// v0.28.0：這場錄音中斷的地方（續錄＝前幾段的也在；beginRun 寫進 run.gaps，接回來時也直接加進 run.gaps）
     @ObservationIgnored private var sessionGaps: [RecordGap] = []
@@ -333,6 +337,27 @@ final class AppModel {
     /// 切到別的 App 時工作會暫停，分人秒數要把這段分開講。
     private func watchBackground() {
         let center = NotificationCenter.default
+        // v0.29.0 診斷（iPad 多視窗閃退還沒找到原因）：錄音中切到非作用中／回到作用中各記一行，附可用記憶體。只記，不改行為（不重接、不重開）
+        center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.phase == .recording else { return }
+                self.log("切到非作用中（可用記憶體 \(Store.availableMemoryMB) MB）")
+            }
+        }
+        center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.phase == .recording else { return }
+                self.log("回到作用中（可用記憶體 \(Store.availableMemoryMB) MB）")
+            }
+        }
+        // v0.29.0 診斷：系統警告記憶體不足（不在錄音也記在這次開 App 的紀錄）
+        center.addObserver(forName: UIApplication.didReceiveMemoryWarningNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                let recording = self.phase == .recording
+                self.log("系統警告記憶體不足（可用記憶體 \(Store.availableMemoryMB) MB\(recording ? "，錄音中" : "")）", toRun: recording)
+            }
+        }
         center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.backgroundSince = Date()
@@ -506,8 +531,37 @@ final class AppModel {
         startRecording(to: file)
     }
 
+    /// v0.29.0 診斷：錄音畫面大小變了（iPad 拉視窗、分割畫面、多視窗）。距離上次記不到 1 秒就等到滿 1 秒再記最後的大小；只記點數和可用記憶體，不改行為
+    func noteRecordingSize(_ size: CGSize) {
+        guard phase == .recording else { return }
+        sizeTask?.cancel()
+        let wait = 1 - Date().timeIntervalSince(sizeLoggedAt)
+        guard wait > 0 else {
+            logRecordingSize(size)
+            return
+        }
+        sizeTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled else { return }
+            self?.logRecordingSize(size)
+        }
+    }
+
+    private func logRecordingSize(_ size: CGSize) {
+        guard phase == .recording, size != sizeLogged,
+              size.width.isFinite, size.height.isFinite, size.width < 100_000, size.height < 100_000 else { return }
+        sizeLogged = size
+        sizeLoggedAt = Date()
+        let width = Int(size.width.rounded())
+        let height = Int(size.height.rounded())
+        log("錄音畫面大小：\(width)×\(height) 點（可用記憶體 \(Store.availableMemoryMB) MB）")
+    }
+
     /// target 是 nil 就是新的一場；有值是續錄那段的檔（continuing 已經設好）。
     private func startRecording(to target: URL?) {
+        // v0.29.0 診斷：新的一場（續錄的一段）第一次的畫面大小照樣記
+        sizeLogged = nil
+        sizeLoggedAt = Date.distantPast
         // v0.23.5：下課 Whisper 讓路給錄音（標記留著，停止後接著轉）
         whisper.pause("開始錄音")
         // v0.27.0：這場的場景、人數按下時定

@@ -51,6 +51,8 @@ final class AudioPump: @unchecked Sendable {
     private var quickToken = 0
     /// v0.28.0：獨佔麥克風接不回來，這場已經暫時改成和別的 App 共用（MicFallback）；維持到按停止
     private var fellBackToShared = false
+    /// v0.29.0 診斷：上次 installTap 用的格式（取樣率、聲道；改用硬體格式時也寫）。只在主執行緒讀寫
+    private var tapFormatNote = "還沒裝"
 
     var seconds: Double {
         lock.lock()
@@ -90,6 +92,8 @@ final class AudioPump: @unchecked Sendable {
         try installTap()
         engine.prepare()
         try engine.start()
+        // v0.29.0 診斷：開始時的取樣率、聲道（多視窗閃退還沒找到原因，之後的變化和這行比）
+        onEvent("收音開始；\(formatLine())")
 
         let center = NotificationCenter.default
         // 來電、Siri、鬧鐘、別的 App 要用聲音：iOS 先關掉我們的麥克風（began），用完才可能通知（ended）。
@@ -139,7 +143,9 @@ final class AudioPump: @unchecked Sendable {
             queue: .main
         ) { [weak self] _ in
             guard let self else { return }
-            self.onEvent("音訊設定變了，重接麥克風；\(self.recover())")
+            // v0.29.0 診斷：重接前的硬體格式和舊的 tap 格式（重接後的 tap 格式寫在「已接回」那句後面）
+            let before = self.formatLine()
+            self.onEvent("音訊設定變了，重接麥克風；\(before)；\(self.recover())")
         })
         // 系統的聲音服務整個重開（少見）：類別要重設。
         observers.append(center.addObserver(
@@ -225,14 +231,16 @@ final class AudioPump: @unchecked Sendable {
         }
         engine.inputNode.removeTap(onBus: 0)
         do {
-            try installTap()
+            try installTap(recovering: true)
             engine.prepare()
             try engine.start()
             // 改共用那次 engine 沒開起來（那行以「接不回來」開頭，看門狗不記）：之後接回來時照樣寫這場是共用
             let sharedNote = switched.isEmpty && fellBackToShared ? "（這場已改成和別的 App 共用）" : ""
-            return (true, "\(switched)已接回麥克風（\(Self.currentInput())）\(sharedNote)")
+            // v0.29.0 診斷：接回來用的 tap 格式接在最後（看門狗照開頭的字判斷，不能放前面）
+            return (true, "\(switched)已接回麥克風（\(Self.currentInput())）\(sharedNote)；tap \(tapFormatNote)")
         } catch {
-            return (false, "接不回來：\(error.localizedDescription)\(Self.code(error))" + (switched.isEmpty ? "" : "（\(switched)）"))
+            let failed = "接不回來：\(error.localizedDescription)\(Self.code(error))" + (switched.isEmpty ? "" : "（\(switched)）")
+            return (false, failed + "；" + formatLine())
         }
     }
 
@@ -318,21 +326,64 @@ final class AudioPump: @unchecked Sendable {
         }
     }
 
-    private func installTap() throws {
+    /// recovering：重接（打斷結束、看門狗、音訊設定變了）時是 true
+    private func installTap(recovering: Bool = false) throws {
         let node = engine.inputNode
-        let format = node.outputFormat(forBus: 0)
+        let output = node.outputFormat(forBus: 0)
+        let hardware = node.inputFormat(forBus: 0)
+        var format = output
+        var note = Self.describe(output)
+        // v0.29.0 推論的防護（原因未確認，還沒在真機重現）：多視窗、分割畫面、切 App 之後，麥克風硬體的取樣率可能已經變了，
+        // inputNode 的輸出格式卻還是舊的；用取樣率和硬體不合的格式 installTap 會丟 Objective-C 例外（Swift 的 do/catch 接不到，直接閃退）。
+        // 取樣率不一樣就照硬體的取樣率裝（聲道照輸出格式）；轉檔和給語音引擎的轉換器照這個格式建，convert 照每個 buffer 的取樣率算比例，下游照舊。
+        // 只有聲道數不一樣：照舊用輸出格式，只記下來。
+        // 重接時硬體格式是 0（麥克風被別的視窗或 App 佔著）：不裝、丟錯，交給快速重試和看門狗；第一次開始照舊（不擋錄音）。
+        if hardware.sampleRate > 0, hardware.channelCount > 0 {
+            if hardware.sampleRate != output.sampleRate {
+                let channels = output.channelCount > 0 ? output.channelCount : hardware.channelCount
+                format = AVAudioFormat(commonFormat: output.commonFormat, sampleRate: hardware.sampleRate,
+                                       channels: channels, interleaved: output.isInterleaved) ?? hardware
+                note = Self.describe(format) + "（輸出格式 \(Self.describe(output)) 和麥克風輸入 \(Self.describe(hardware)) 取樣率不合，改照輸入的取樣率）"
+            } else if hardware.channelCount != output.channelCount {
+                note += "（麥克風輸入 \(Self.describe(hardware)) 聲道數不同，照舊用輸出格式）"
+            }
+        } else if recovering {
+            tapFormatNote = "沒裝（麥克風輸入是 \(Self.describe(hardware))）"
+            throw RecorderError.couldNotStart
+        }
         guard format.sampleRate > 0, format.channelCount > 0,
               let fileConverter = AVAudioConverter(from: format, to: fileFormat),
               let analyzerConverter = AVAudioConverter(from: format, to: analyzerFormat) else {
+            tapFormatNote = "沒裝（格式不能用：\(Self.describe(format))）"
             throw RecorderError.couldNotStart
         }
         lock.lock()
         toFile = fileConverter
         toAnalyzer = analyzerConverter
         lock.unlock()
+        tapFormatNote = note
         node.installTap(onBus: 0, bufferSize: 4096, format: format) { [weak self] buffer, _ in
             self?.handle(buffer)
         }
+    }
+
+    /// v0.29.0 診斷（只有數字）：聲音工作階段的取樣率、麥克風輸入（inputNode 的硬體那邊）、inputNode 的輸出、上次 tap 用的格式
+    func formatLine() -> String {
+        if simulating { return "格式：模擬上課（不用麥克風）" }
+        let sessionRate = AVAudioSession.sharedInstance().sampleRate
+        let node = engine.inputNode
+        let hardware = node.inputFormat(forBus: 0)
+        let output = node.outputFormat(forBus: 0)
+        return "格式：工作階段 \(Self.hz(sessionRate))；麥克風輸入 \(Self.describe(hardware))；輸出 \(Self.describe(output))；tap \(tapFormatNote)"
+    }
+
+    private static func hz(_ rate: Double) -> String {
+        guard rate.isFinite, rate >= 0, rate < 1e7 else { return "? Hz" }
+        return "\(Int(rate)) Hz"
+    }
+
+    private static func describe(_ format: AVAudioFormat) -> String {
+        "\(hz(format.sampleRate)) \(format.channelCount) 聲道"
     }
 
     private func handle(_ buffer: AVAudioPCMBuffer) {

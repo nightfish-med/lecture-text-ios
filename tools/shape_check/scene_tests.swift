@@ -382,6 +382,42 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     let topicPromptWords: [String] = ["使用者說這場的主題", "主題以它為準", "使用者說的主題，或上下文"]
     let topicPromptMissing: [String] = topicPromptWords.filter { (word: String) -> Bool in !CardPrompt.system.contains(word) }
     check(topicPromptMissing.joined(separator: "、"), "", "主題：卡片提示詞講明非課程以主題為準、主題算改字的證據")
+
+    // ---- v0.29.0 錄音中複製（卡片模式）：到目前為止的全文（比對片段手寫，期望值確定）
+    var copyDone = LiveCard(id: 1, start: 0, end: 60, raw: "今天講像量那個我們開始。")
+    copyDone.state = .done
+    copyDone.expanded = "今天講向量。我們開始。"
+    copyDone.page = 2
+    let copyDiff: [CardDiff.Piece] = [
+        CardDiff.Piece(kind: .same, text: "今天講", old: "", group: -1),
+        CardDiff.Piece(kind: .changed, text: "向", old: "像", group: 0),
+        CardDiff.Piece(kind: .same, text: "量。\n", old: "", group: -1),
+        CardDiff.Piece(kind: .deleted, text: "", old: "那個", group: 1),
+        CardDiff.Piece(kind: .same, text: "我們開始。", old: "", group: -1),
+    ]
+    let copyDoneBlock: String = CardCopy.block(copyDone, diff: copyDiff)
+    check(copyDoneBlock, "[00:00–01:00　p.2]\n今天講向［像］量。\n［刪：那個］我們開始。", "錄音中複製：改字［原字］、刪掉的寫［刪：原字］、時間和頁碼一行")
+    var copyEdited = LiveCard(id: 2, start: 60, end: 120, raw: "甲具。乙句。")
+    copyEdited.state = .done
+    copyEdited.expanded = "甲句。乙句。"
+    copyEdited.edits = [CardEdit(line: 0, before: "甲句。", after: "甲狗。", by: CardEdit.user)]
+    let editedDiff: [CardDiff.Piece] = [
+        CardDiff.Piece(kind: .same, text: "甲", old: "", group: -1),
+        CardDiff.Piece(kind: .changed, text: "句", old: "具", group: 0),
+        CardDiff.Piece(kind: .same, text: "。\n乙句。", old: "", group: -1),
+    ]
+    let copyEditedBlock: String = CardCopy.block(copyEdited, diff: editedDiff)
+    check(copyEditedBlock, "[01:00–02:00]\n甲狗。\n乙句。", "錄音中複製：使用者改過的行照改好的字、不標原字")
+    let copyWaiting = LiveCard(id: 3, start: 120, end: 180, raw: "還在等的字。")
+    var copyFailed = LiveCard(id: 4, start: 180, end: 240, raw: "")
+    copyFailed.state = .failed
+    let copyDiffs: [Int: [CardDiff.Piece]] = [1: copyDiff, 2: editedDiff]
+    let copyAll: String = CardCopy.live([copyWaiting, copyEdited, copyFailed, copyDone], diffs: copyDiffs, tail: "  最後幾句 ")
+    let copyWant: String = copyDoneBlock + "\n\n" + copyEditedBlock + "\n\n[02:00–03:00　還沒整理，Whisper 原字]\n還在等的字。"
+        + "\n\n[還沒進卡的字，Whisper 原字]\n最後幾句"
+    check(copyAll, copyWant, "錄音中複製：依時間排、還沒整理的用 Whisper 原字、沒字的卡不放、最後接還沒進卡的字")
+    let copyEmpty: String = CardCopy.live([], diffs: [:], tail: " \n ")
+    check(copyEmpty, "", "錄音中複製：都沒有字＝空的")
     if let body = try? CardRefresh.requestBody(courseBlock: "課名：解析幾何", userMessage: "稿"),
        let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] {
         let config: [String: Any] = object["output_config"] as? [String: Any] ?? [:]

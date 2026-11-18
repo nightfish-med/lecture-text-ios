@@ -125,6 +125,11 @@ final class AppModel {
         let body = String(text.dropFirst(min(max(start, 0), text.count)))
         return String(body.trimmingCharacters(in: .whitespacesAndNewlines).suffix(800))
     }
+    /// v0.29.0 錄音中複製用：還沒排進批次的 Whisper 字（不截短；畫面用的 cardTail 只留最後 800 字）
+    private var cardTailForCopy: String {
+        guard let text = run?.text, let start = reviewer?.unsentOffset else { return "" }
+        return String(text.dropFirst(min(max(start, 0), text.count)))
+    }
 
     var showImporter = false
     /// v0.15：開「連電腦」畫面（手機當電腦的麥克風）。
@@ -2297,15 +2302,25 @@ final class AppModel {
         guard phase == .recording, let current = run else { return }
         let at = recordingSeconds
         if let review = reviewer, review.cardMode {
-            let text = CardText.copy(review.cards)
-            guard !text.isEmpty else {
-                flashLiveCopy("還沒有整理好的卡")
+            // v0.29.0：以前只複製整理好的卡的重點＋整理版；改成到目前為止的全文（CardCopy.live：每張卡的時間、改好的字［原字］、
+            // 還沒整理的卡用 Whisper 原字、最後接還沒進卡的字），稿頭和非卡片模式一樣。續錄：前幾段的字（head）照停止後的規則接在前面
+            let segment = review.segmentCards
+            let tail = cardTailForCopy
+            let gaps = Array(sessionGaps.dropFirst(partGapStart))
+            let body = CardCopy.live(segment, diffs: review.diffs, tail: tail, gaps: gaps)
+            let text = (continuing?.head ?? "") + body
+            guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                flashLiveCopy("還沒有字可以複製")
                 return
             }
-            UIPasteboard.general.setItems([[UTType.plainText.identifier: text]], options: [.localOnly: true])
+            var snapshot = current
+            snapshot.text = text
+            let document = LiveCopy.addHeaderLine(snapshot.liveDocument(at: at), line: reviewStatusLine.replacingOccurrences(of: "　", with: "；"))
+            UIPasteboard.general.setItems([[UTType.plainText.identifier: document]], options: [.localOnly: true])
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
             // 紀錄只寫張數和字數，不放稿的字
-            log("錄音中複製卡片：到 \(formatStamp(at))，\(review.cards.filter { $0.state == .done }.count) 張，\(text.count) 字")
+            let doneCount = segment.filter { $0.state == .done }.count
+            log("錄音中複製（卡片全文）：到 \(formatStamp(at))，這段 \(segment.count) 張（整理好 \(doneCount) 張），\(text.count) 字")
             flashLiveCopy("已複製到 \(formatStamp(at))")
             return
         }

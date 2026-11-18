@@ -234,18 +234,50 @@ private struct RecordingView: View {
             content
         }
         .overlay(alignment: .bottomTrailing) {
-            Button {
-                model.recordButtonTapped()
-            } label: {
-                Image(systemName: "stop.circle.fill")
-                    .font(.system(size: stopSize))
-                    .foregroundStyle(.red)
-                    .background(Circle().fill(Color.white).padding(3))
-                    .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+            // v0.29.0：複製鈕回來，和停止鈕並排（左複製、右停止，一樣大；不疊上下，iPad 視窗最矮約 100 點）
+            HStack(spacing: short ? 8 : 12) {
+                if let note = model.liveCopyNote, !copied {
+                    // 「還沒有字可以複製」這類說明（2 秒後消失）
+                    Text(note)
+                        .font(.caption)
+                        .foregroundStyle(.black)
+                        .lineLimit(1)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.white))
+                        .overlay(Capsule().stroke(Color.black.opacity(0.2), lineWidth: 1))
+                }
+                Button {
+                    model.copyWhileRecording()
+                } label: {
+                    Image(systemName: copied ? "checkmark" : "doc.on.doc")
+                        .font(.system(size: stopSize * 0.42, weight: .semibold))
+                        .foregroundStyle(.black)
+                        .frame(width: stopSize, height: stopSize)
+                        .background(Circle().fill(Color.white))
+                        .overlay(Circle().stroke(Color.black.opacity(0.25), lineWidth: 1))
+                        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                }
+                .accessibilityLabel(copied ? "已複製" : "複製到目前為止的全文")
+                .accessibilityHint("錄音不會停")
+                Button {
+                    model.recordButtonTapped()
+                } label: {
+                    Image(systemName: "stop.circle.fill")
+                        .font(.system(size: stopSize))
+                        .foregroundStyle(.red)
+                        .background(Circle().fill(Color.white).padding(3))
+                        .shadow(color: .black.opacity(0.2), radius: 3, y: 1)
+                }
+                .accessibilityLabel("停止錄音")
             }
-            .accessibilityLabel("停止錄音")
             .padding(.bottom, short ? 4 : 10)
         }
+    }
+
+    /// v0.29.0：剛複製成功（「已複製到 mm:ss」顯示的 2 秒內）複製鈕換成勾；失敗的說明不算
+    private var copied: Bool {
+        model.liveCopyNote?.hasPrefix("已複製") == true
     }
 
     @ViewBuilder

@@ -353,6 +353,68 @@ enum CardLines {
     }
 }
 
+// MARK: - v0.29.0 錄音中複製（卡片模式）：到目前為止的全文
+
+/// 錄音中按複製（卡片模式）的內文（稿頭由 Model 照「複製全文」的格式加）。以前只複製整理好的卡的重點＋整理版。
+/// 每張卡（依時間）一段：第一行「[mm:ss–mm:ss　p.N]」，下面是逐字稿一句一行：
+/// - 整理到的卡：Haiku 改好的字，改過的字後面接［原字］（和非卡片模式的錄音中複製一樣，全形方括號）；
+///   被刪掉的原字寫成「［刪：原字］」放在刪掉的位置（單寫［原字］會被看成前一個字的原字）；
+///   使用者點一下改過、或重查改過的那一行照改好的字（不標原字：那一行已經和比對的片段對不上）
+/// - 還沒整理到、沒整理到的卡：Whisper 原字，時間那行標明
+/// 最後接還沒進卡的字（Whisper 原字，前面一行標明）。錄音中斷照錄音位置插一行〔錄音中斷…〕（GapMarks）。都沒有字＝空字串。
+enum CardCopy {
+    static let waitingNote = "還沒整理，Whisper 原字"
+    static let failedNote = "沒整理到，Whisper 原字"
+    static let tailHead = "[還沒進卡的字，Whisper 原字]"
+
+    /// 一行：same 照抄、changed 接［原字］（同一組只在最後一片有原字）、deleted 寫［刪：原字］；改過的行照改好的字
+    static func marked(_ line: CardLine) -> String {
+        if line.editedFrom != nil { return line.text }
+        var out = ""
+        for piece in line.pieces {
+            switch piece.kind {
+            case .same:
+                out += piece.text
+            case .changed:
+                out += piece.text
+                if !piece.old.isEmpty { out += "［" + piece.old + "］" }
+            case .deleted:
+                if !piece.old.isEmpty { out += "［刪：" + piece.old + "］" }
+            }
+        }
+        return out
+    }
+
+    /// 一張卡一段（時間那行＋一句一行）；沒有字＝空字串
+    static func block(_ card: LiveCard, diff: [CardDiff.Piece]?) -> String {
+        let rows: [String] = CardLines.build(card, diff: diff).map { (line: CardLine) -> String in marked(line) }
+            .filter { (row: String) -> Bool in !row.trimmingCharacters(in: .whitespaces).isEmpty }
+        guard !rows.isEmpty else { return "" }
+        var head = CardText.range(card)
+        if let page = card.page { head += "　p.\(page)" }
+        switch card.state {
+        case .done: break
+        case .waiting: head += "　" + waitingNote
+        case .failed: head += "　" + failedNote
+        }
+        return "[" + head + "]\n" + rows.joined(separator: "\n")
+    }
+
+    /// cards＝這一段的卡（續錄前幾段的字由呼叫的人接在前面）；diffs＝審稿器算好的比對；tail＝還沒進卡的 Whisper 字；gaps＝這一段的錄音中斷
+    static func live(_ cards: [LiveCard], diffs: [Int: [CardDiff.Piece]], tail: String, gaps: [RecordGap] = []) -> String {
+        let sorted: [LiveCard] = cards.sorted { (a: LiveCard, b: LiveCard) -> Bool in a.start < b.start }
+        let blocks: [(start: Double, text: String)] = sorted.map { (card: LiveCard) -> (start: Double, text: String) in
+            (start: card.start, text: block(card, diff: diffs[card.id]))
+        }
+        var parts: [String] = GapMarks.insert(blocks, gaps: gaps).filter { (part: String) -> Bool in !part.isEmpty }
+        let rest = tail.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !rest.isEmpty {
+            parts.append(tailHead + "\n" + rest)
+        }
+        return parts.joined(separator: "\n\n")
+    }
+}
+
 /// 一行在卡片欄裡的上下位置（點）
 struct LineBox: Equatable {
     var index: Int

@@ -413,8 +413,8 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     copyFailed.state = .failed
     let copyDiffs: [Int: [CardDiff.Piece]] = [1: copyDiff, 2: editedDiff]
     let copyAll: String = CardCopy.live([copyWaiting, copyEdited, copyFailed, copyDone], diffs: copyDiffs, tail: "  最後幾句 ")
-    let copyWant: String = copyDoneBlock + "\n\n" + copyEditedBlock + "\n\n[02:00–03:00　還沒整理，Whisper 原字]\n還在等的字。"
-        + "\n\n[還沒進卡的字，Whisper 原字]\n最後幾句"
+    let copyWantParts: [String] = [copyDoneBlock, copyEditedBlock, "[02:00–03:00　還沒整理，Whisper 原字]\n還在等的字。", "[還沒進卡的字，Whisper 原字]\n最後幾句"]
+    let copyWant: String = copyWantParts.joined(separator: "\n\n")
     check(copyAll, copyWant, "錄音中複製：依時間排、還沒整理的用 Whisper 原字、沒字的卡不放、最後接還沒進卡的字")
     let copyEmpty: String = CardCopy.live([], diffs: [:], tail: " \n ")
     check(copyEmpty, "", "錄音中複製：都沒有字＝空的")

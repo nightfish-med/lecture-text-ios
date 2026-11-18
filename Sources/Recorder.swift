@@ -335,11 +335,13 @@ final class AudioPump: @unchecked Sendable {
         var note = Self.describe(output)
         // v0.29.0 推論的防護（原因未確認，還沒在真機重現）：多視窗、分割畫面、切 App 之後，麥克風硬體的取樣率可能已經變了，
         // inputNode 的輸出格式卻還是舊的；用取樣率和硬體不合的格式 installTap 會丟 Objective-C 例外（Swift 的 do/catch 接不到，直接閃退）。
-        // 取樣率不一樣就照硬體的取樣率裝（聲道照輸出格式）；轉檔和給語音引擎的轉換器照這個格式建，convert 照每個 buffer 的取樣率算比例，下游照舊。
-        // 只有聲道數不一樣：照舊用輸出格式，只記下來。
+        // 只在重接時：取樣率不一樣就照硬體的取樣率裝（聲道照輸出格式）；轉檔和給語音引擎的轉換器照這個格式建，convert 照每個 buffer 的取樣率算比例，下游照舊。
+        // 第一次開始（每場都是新的 AVAudioEngine，沒有舊格式）照舊用輸出格式，不合只記下來。只有聲道數不一樣：照舊用輸出格式，只記下來。
         // 重接時硬體格式是 0（麥克風被別的視窗或 App 佔著）：不裝、丟錯，交給快速重試和看門狗；第一次開始照舊（不擋錄音）。
         if hardware.sampleRate > 0, hardware.channelCount > 0 {
-            if hardware.sampleRate != output.sampleRate {
+            if hardware.sampleRate != output.sampleRate, !recovering {
+                note += "（麥克風輸入 \(Self.describe(hardware)) 取樣率不同，第一次開始照舊用輸出格式）"
+            } else if hardware.sampleRate != output.sampleRate {
                 let channels = output.channelCount > 0 ? output.channelCount : hardware.channelCount
                 format = AVAudioFormat(commonFormat: output.commonFormat, sampleRate: hardware.sampleRate,
                                        channels: channels, interleaved: output.isInterleaved) ?? hardware

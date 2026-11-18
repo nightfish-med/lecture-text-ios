@@ -762,9 +762,9 @@ final class LiveReviewer {
         save()
         guard stop == nil else { return }
         onEvent("重查：第 \(cardID) 張卡圈了 \(texts.count) 行" + (others.isEmpty ? "" : "（跨 \(parts.count) 張卡）"))
-        let refs: [RefTerm] = nonCourse ? (log.refTerms ?? []) : []
+        let knownTerms: [RefTerm] = nonCourse ? (log.refTerms ?? []) : []
         let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts, nonCourse: nonCourse, topic: topic,
-                                                references: refs)
+                                                references: knownTerms)
         enqueueRecheck(cardID: cardID, recheckID: id, message: message)
     }
 
@@ -952,7 +952,7 @@ final class LiveReviewer {
             log.refRounds = round
         }
         if result.cancelled {
-            save()
+            // 停止收尾了：不再寫檔（續錄的審稿器可能已經在寫同一個檔）
             return
         }
         if let failure = result.failure {

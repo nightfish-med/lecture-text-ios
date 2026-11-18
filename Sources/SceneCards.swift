@@ -956,6 +956,8 @@ enum RefSearch {
     static let maxTermLength = 30
     static let maxNoteLength = 24
     static let maxAboutLength = 60
+    /// Pencil 重查收進來的參照詞的說明（判斷「沒講到參照詞」時不算這些）
+    static let recheckNote = "Pencil 重查確認"
 
     static let system = """
     你幫忙替一場錄音整理「參照詞」，讓之後整理逐字稿時專有名詞寫得對。使用者給你這場到目前為止的語音辨識逐字稿（Whisper，常把專有名詞聽成同音字），可能還有使用者自己寫的主題。
@@ -1000,10 +1002,12 @@ enum RefSearch {
 
     /// 最近那段稿裡一個參照詞都沒出現（不分大小寫的子字串比對），而且那段有 minWindowChars 字以上＝話題換了，要重新搜尋。
     /// 還沒有任何參照詞時，只要那段字夠多就算
+    /// Pencil 重查收進來的詞不算（一般的改字一直出現，會讓話題換了也不重搜）
     static func stale(terms: [RefTerm], window: String) -> Bool {
         guard window.count >= minWindowChars else { return false }
         let lower = window.lowercased()
-        return !terms.contains { (t: RefTerm) -> Bool in
+        let searched: [RefTerm] = terms.filter { (t: RefTerm) -> Bool in t.note != recheckNote }
+        return !searched.contains { (t: RefTerm) -> Bool in
             let k = t.term.lowercased()
             return !k.isEmpty && lower.contains(k)
         }
@@ -1095,7 +1099,7 @@ enum RefSearch {
         fixes.compactMap { (fix: RecheckFix) -> RefTerm? in
             let text: String = fix.new.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty, text.count <= maxTermLength else { return nil }
-            return RefTerm(term: text, note: "Pencil 重查確認")
+            return RefTerm(term: text, note: recheckNote)
         }
     }
 

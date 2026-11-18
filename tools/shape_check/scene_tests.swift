@@ -710,6 +710,8 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     let fromFixes: [RefTerm] = RefSearch.fromRecheck([RecheckFix(old: "丁午", new: "丁戊法則"), RecheckFix(old: "乙", new: "  "),
                                                       RecheckFix(old: "丙", new: String(repeating: "丙", count: 31))])
     check(refList(fromFixes), "丁戊法則:Pencil 重查確認", "參照詞：重查改的字收進來（空的、太長的不收）")
+    let staleRecheckOnly: Bool = RefSearch.stale(terms: fromFixes, window: filler + "丁戊法則")
+    check("\(staleRecheckOnly)", "true", "參照詞：重查收進來的詞出現不算（話題換了照樣重搜）")
 
     // 狀態列
     let fragBusy: String = RefSearch.statusFragment(count: 3, rounds: 1, busy: true)
@@ -729,8 +731,11 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     let refLogBack: ReviewLog? = refLogData.flatMap { (d: Data) -> ReviewLog? in try? JSONDecoder().decode(ReviewLog.self, from: d) }
     check(refLogBack == refLog ? "一樣" : "不一樣", "一樣", "改字紀錄：參照詞、輪數、花費、檢查時間存得進去也讀得回來")
     let oldLog: ReviewLog? = try? JSONDecoder().decode(ReviewLog.self, from: Data("{\"course\": \"\"}".utf8))
-    let oldLogRef: String = oldLog.map { (l: ReviewLog) -> String in l.refTerms == nil && l.refRounds == nil && l.refCostUSD == nil ? "nil" : "有" } ?? "讀不開"
-    check(oldLogRef, "nil", "舊改字紀錄：沒有參照詞欄位照讀")
+    let oldTermsNil: Bool = oldLog != nil && oldLog?.refTerms == nil
+    let oldRoundsNil: Bool = oldLog != nil && oldLog?.refRounds == nil
+    let oldCostNil: Bool = oldLog != nil && oldLog?.refCostUSD == nil
+    let oldLogRef: String = "\(oldTermsNil)|\(oldRoundsNil)|\(oldCostNil)"
+    check(oldLogRef, "true|true|true", "舊改字紀錄：沒有參照詞欄位照讀")
     let refSummary: String = refLog.summaryLine
     let refSummaryOK: Bool = refSummary.contains("約 0.500 美元") && refSummary.contains("參照詞 2 個（搜尋 1 輪、約 0.040 美元另計）")
         && !refSummary.contains("甲乙丙書店") && !refSummary.contains("一場分享")

@@ -480,6 +480,11 @@ enum Store {
         try? "\(step)（當時還剩 \(left) MB 可用）".write(to: crumbFile, atomically: true, encoding: .utf8)
     }
 
+    /// v0.29.0 診斷用：現在還剩多少記憶體可用（MB，和閃退紀錄同一個算法）
+    static var availableMemoryMB: Int {
+        Int(os_proc_available_memory() / 1_048_576)
+    }
+
     /// 讀了就清掉，同一次閃退只講一次。
     static func takeCrumb() -> String? {
         let text = try? String(contentsOf: crumbFile, encoding: .utf8)
@@ -539,6 +544,10 @@ struct SavedRun: Codable {
     var scene: String? = nil
     /// v0.28.0 起：錄音中斷的地方（看門狗看到停了、又接回來；RecordGap）。nil＝沒斷過或舊稿
     var gaps: [RecordGap]? = nil
+    /// v0.29.0 起：這場是「非課程（其他場合）」：course 照樣是 nil（檔名未分類、不自動上傳），Haiku 用非課程的區塊送；續錄照這欄還原。nil＝不是或舊稿
+    var nonCourse: Bool? = nil
+    /// v0.29.0 起：非課程時使用者寫的主題（稿頭「主題：…」）；nil＝沒寫
+    var topic: String? = nil
 
     /// 畫面最上面的標題：改過的 → 「11/10 幾何」（照課表）→ 「11/10 10:20」（App 錄的、不在上課時段）→ 選來的檔用原檔名。
     var displayTitle: String {
@@ -619,6 +628,12 @@ struct SavedRun: Codable {
         // v0.27.1：錄音時的場景（以前的課清單讀這行）
         if let scene, let value = RecordScene(rawValue: scene) {
             head.append("場景：\(value.title)")
+        }
+        // v0.29.0：非課程（其他場合）和使用者寫的主題（以前的課清單不讀這行，多一行不影響）
+        if nonCourse == true {
+            head.append("主題：\(SessionTopic.clean(topic) ?? "（沒寫）")（非課程，其他場合；使用者自己寫的）")
+        } else if let written = SessionTopic.clean(topic) {
+            head.append("主題：\(written)（使用者自己寫的）")
         }
         if let parts, parts.count > 1 {
             head.append("錄音：共 \(parts.count) 段（\(parts.joined(separator: "、"))），字照順序接在一起，時間.json 的秒數從第一段開頭算")

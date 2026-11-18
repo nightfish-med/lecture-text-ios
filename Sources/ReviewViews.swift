@@ -50,10 +50,11 @@ struct HaikuMenu: View {
                 }
             }
             // v0.23.2：不在課表時段也能送 Haiku——先指定下一場是哪門課（標題、資料夾、Haiku 都照它；錄一場就清掉）
+            // v0.29.0：也可以選「非課程（其他場合）」（下一場檔名照時間、不自動上傳，Haiku 照非課程送）
             Menu {
                 CoursePicker(model: model, includeSchedule: true)
             } label: {
-                Label("下一場是哪門課：\(model.chosenCourse ?? "照課表")", systemImage: "book.closed")
+                Label("下一場是哪門課：\(model.nextCourseLabel)", systemImage: "book.closed")
             }
             // v0.23.2：自動上傳測試資料（Google 雲端硬碟「轉文字App測試資料」；錄音不傳、私人課程不傳）
             DriveItems(drive: model.drive)
@@ -178,6 +179,16 @@ struct HaikuSheets: ViewModifier {
             } message: {
                 Text("登入後，每次按停止，這場的稿、即時稿、改字紀錄、版本與錯誤紀錄（就是「匯出（不含錄音）」那一包）會傳到你的 Google 雲端硬碟「\(DrivePlan.rootFolderName)」資料夾。錄音不傳，私人課程不傳，可以在這個選單關掉。App 只碰得到自己建的檔。")
             }
+            // v0.29.0：選了「非課程（其他場合）」之後問主題（可以不寫）；錄音中「改主題」也用這個
+            .alert("這場的主題", isPresented: $model.askTopic) {
+                TextField("例：讀書會（可以不寫）", text: $model.topicDraft)
+                Button("好") {
+                    model.saveTopic()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("非課程（其他場合）。主題會附在每次送 Haiku 的請求裡，幫它判斷這場在講什麼、改聽錯的字；錄音中可以再改。")
+            }
             .confirmationDialog(
                 "這份投影片是哪門課？",
                 isPresented: Binding(
@@ -226,6 +237,7 @@ struct HaikuSheets: ViewModifier {
 }
 
 /// v0.23.2：課名清單（課表上的課，私人課程除外）。錄音前＝指定下一場；錄音中＝只給這場的 Haiku 用。
+/// v0.29.0：最上面多「非課程（其他場合）」（選了跳主題輸入框）；錄音前選了非課程再多一行「改主題」
 struct CoursePicker: View {
     let model: AppModel
     /// 錄音前多一個「照課表」
@@ -236,11 +248,27 @@ struct CoursePicker: View {
             Button {
                 model.assignCourse(nil)
             } label: {
-                if model.chosenCourse == nil {
+                if model.chosenCourse == nil && !model.chosenNonCourse {
                     Label("照課表", systemImage: "checkmark")
                 } else {
                     Text("照課表")
                 }
+            }
+        }
+        Button {
+            model.assignNonCourse()
+        } label: {
+            if includeSchedule && model.chosenNonCourse {
+                Label("非課程（其他場合）", systemImage: "checkmark")
+            } else {
+                Text("非課程（其他場合）")
+            }
+        }
+        if includeSchedule && model.chosenNonCourse {
+            Button {
+                model.editTopic()
+            } label: {
+                Label("改主題：\(model.chosenTopic ?? "（沒寫）")", systemImage: "pencil")
             }
         }
         ForEach(AppModel.scheduleCourses(includePrivate: false), id: \.self) { course in
@@ -267,13 +295,41 @@ struct ReviewStatusBar: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             if model.reviewer == nil && model.reviewNeedsCourse {
+                // v0.29.0：選單多「非課程（其他場合）」；旁邊（窄時下一行）問「這場當非課程送 Haiku？」，不按＝和以前一樣不送
+                HStack(spacing: 8) {
+                    Menu {
+                        Section("這場是哪門課（只給 Haiku 用）") {
+                            CoursePicker(model: model, includeSchedule: false)
+                        }
+                    } label: {
+                        HStack(spacing: 4) {
+                            Text(model.reviewStatusLine)
+                            Image(systemName: "chevron.down")
+                        }
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    }
+                    if short && model.offersNonCourse {
+                        NonCourseOffer(model: model, short: true)
+                    }
+                }
+                if !short && model.offersNonCourse {
+                    NonCourseOffer(model: model, short: false)
+                }
+            } else if model.sessionNonCourse && model.reviewer != nil {
+                // v0.29.0：非課程送的時候，點這行可以改主題
                 Menu {
-                    Section("這場是哪門課（只給 Haiku 用）") {
-                        CoursePicker(model: model, includeSchedule: false)
+                    Section("非課程（其他場合）主題：\(model.sessionTopic ?? "（沒寫）")") {
+                        Button {
+                            model.editTopic()
+                        } label: {
+                            Label("改主題", systemImage: "pencil")
+                        }
                     }
                 } label: {
                     HStack(spacing: 4) {
                         Text(model.reviewStatusLine)
+                            .lineLimit(short ? 1 : 2)
                         Image(systemName: "chevron.down")
                     }
                     .font(.caption)
@@ -298,5 +354,31 @@ struct ReviewStatusBar: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .animation(.easeInOut(duration: 0.2), value: model.reviewer?.banner)
+    }
+}
+
+/// v0.29.0：上課沒有課名而沒送時，狀態列的「這場當非課程送 Haiku？　送」（視窗很矮時只剩「當非課程送」）
+private struct NonCourseOffer: View {
+    let model: AppModel
+    let short: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            if !short {
+                Text("這場當非課程送 Haiku？")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Button {
+                model.assignNonCourse()
+            } label: {
+                Text(short ? "當非課程送" : "送")
+                    .font(.caption.weight(.semibold))
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.mini)
+            .accessibilityLabel("這場當非課程送 Haiku")
+            .accessibilityHint("之前轉出的字也會補送；接著可以寫主題")
+        }
     }
 }

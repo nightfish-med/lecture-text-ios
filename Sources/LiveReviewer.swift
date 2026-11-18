@@ -11,6 +11,10 @@ import Observation
 final class LiveReviewer {
     /// 正式課名（例：解析幾何）
     let course: String
+    /// v0.29.0：這場是「非課程（其他場合）」（course 是空的；重查、重算寫非課程，不寫討論會）
+    let nonCourse: Bool
+    /// v0.29.0：非課程時使用者寫的主題（錄音中可以改；每次送卡片、重查、重算都附在使用者訊息，不放進有快取的課程區塊）
+    private(set) var topic: String?
     /// 這場用的投影片（給人看的名字）；nil＝沒有投影片
     let deckName: String?
     /// 一場的紀錄（fixes.json）
@@ -85,11 +89,15 @@ final class LiveReviewer {
 
     /// base：續錄時原場的改字紀錄（已學規則、off、最大單位編號照舊）
     /// v0.27.0：courseBlock 有給就用它（討論會沒有課名時的中性區塊）；nil＝照課名、對照表、投影片產生
+    /// v0.29.0：nonCourse、topic＝非課程（其他場合）和使用者寫的主題（存進改字紀錄，續錄讀得回）
     init(course: String, deck: SlideDeck?, key: String, base: ReviewLog?, file: URL, courseBlock: String? = nil,
+         nonCourse: Bool = false, topic: String? = nil,
          clock: @escaping @MainActor () -> Double, onEvent: @escaping @MainActor (String) -> Void) {
         let table = LiveFix.rules(course: course)
         let now = clock()
         self.course = course
+        self.nonCourse = nonCourse
+        self.topic = SessionTopic.clean(topic)
         self.deckName = deck?.name
         self.key = key
         self.table = table
@@ -112,6 +120,8 @@ final class LiveReviewer {
                 start.batches[i].error = "上一段停止時沒送完"
             }
         }
+        start.nonCourse = nonCourse ? true : nil
+        start.topic = SessionTopic.clean(topic)
         self.log = start
         self.state = base?.fixState ?? FixState()
         self.learned = Array((base?.fixState.learned ?? []).prefix(Self.maxRules))
@@ -250,6 +260,19 @@ final class LiveReviewer {
         save()
     }
 
+    /// v0.29.0：錄音中改主題（非課程）：之後送的卡片、重查、重算都用新的；記進改字紀錄（續錄讀得回）
+    func setTopic(_ text: String?) {
+        let cleaned = SessionTopic.clean(text)
+        topic = cleaned
+        log.topic = cleaned
+        save()
+    }
+
+    /// v0.29.0 錄音中複製用：這一段（續錄的新段）的卡；前幾段的字在續錄的 head 裡（和停止後的逐字稿同一個規則）
+    var segmentCards: [LiveCard] {
+        cards.filter { $0.id >= firstBatchID }
+    }
+
     /// 回到前景、網路回來：立刻看一次
     func kick() {
         tick()
@@ -335,7 +358,8 @@ final class LiveReviewer {
             // v0.26.0 模式 1：一批一張卡。原稿不帶 [s編號]；回覆比較長，用比較長的逾時
             let raw = units.map(\.text).joined()
             // v0.27.0：這場使用者改過的字附在最後當參考（只這場，不存進任何詞表）
-            let userEdits = CardEdits.promptBlock(cards.flatMap { $0.edits ?? [] })
+            // v0.29.0：非課程的主題（使用者寫的）放在改字對照、說明前面；每次請求都帶現在的主題
+            let userEdits = SessionTopic.promptBlock(topic) + CardEdits.promptBlock(cards.flatMap { $0.edits ?? [] })
             let message = CardPrompt.userMessage(context: batch.context, raw: raw, reference: reference, referenceName: referenceName,
                                                  userEdits: userEdits)
             Task {
@@ -717,7 +741,7 @@ final class LiveReviewer {
         save()
         guard stop == nil else { return }
         onEvent("重查：第 \(cardID) 張卡圈了 \(texts.count) 行" + (others.isEmpty ? "" : "（跨 \(parts.count) 張卡）"))
-        let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts)
+        let message = RecheckPrompt.userMessage(course: course, key: card.key, lines: texts, nonCourse: nonCourse, topic: topic)
         enqueueRecheck(cardID: cardID, recheckID: id, message: message)
     }
 
@@ -974,8 +998,8 @@ final class LiveReviewer {
             return
         }
         let message = CardRefresh.userMessage(transcript: transcript, notes: CardEdits.promptNotes(card.edits ?? []),
-                                              key: card.key, tidy: card.tidy)
-        let block = CardRefresh.courseBlock(course: course)
+                                              key: card.key, tidy: card.tidy, topic: topic)
+        let block = CardRefresh.courseBlock(course: course, nonCourse: nonCourse)
         refreshRunning.insert(id)
         Task {
             await self.runRefresh(id, courseBlock: block, message: message)

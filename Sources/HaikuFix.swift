@@ -866,6 +866,10 @@ struct ReviewLog: Codable, Equatable {
     var costUSD = 0.0
     /// 衝突第 2 次被停用的原字（規格 B2 沒有；續錄還原 FixState 要用）
     var disabled: [String] = []
+    /// v0.29.0：這場是「非課程（其他場合）」（course 是空的）；nil＝不是或舊檔
+    var nonCourse: Bool? = nil
+    /// v0.29.0：非課程時使用者寫的主題；nil＝沒寫或舊檔
+    var topic: String? = nil
 
     init(course: String, slides: String? = nil) {
         self.course = course
@@ -926,6 +930,8 @@ extension ReviewLog {
         maxUnitID = try c.decodeIfPresent(Int.self, forKey: .maxUnitID) ?? 0
         costUSD = try c.decodeIfPresent(Double.self, forKey: .costUSD) ?? 0
         disabled = try c.decodeIfPresent([String].self, forKey: .disabled) ?? []
+        nonCourse = try c.decodeIfPresent(Bool.self, forKey: .nonCourse)
+        topic = try c.decodeIfPresent(String.self, forKey: .topic)
     }
 }
 

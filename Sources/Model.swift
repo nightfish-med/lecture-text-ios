@@ -91,6 +91,18 @@ final class AppModel {
     private(set) var sessionSlides: String?
     /// 開始錄音前指定「這場是哪門課」（正式課名）；按錄音用掉一次就清空。nil＝照課表。
     private(set) var chosenCourse: String?
+    /// v0.29.0：開始錄音前指定「非課程（其他場合）」：下一場 course 照樣 nil（檔名未分類、不自動上傳），Haiku 用非課程的區塊送。
+    /// 和 chosenCourse 只會有一個；按錄音用掉就清空
+    private(set) var chosenNonCourse = false
+    /// v0.29.0：下一場的主題（非課程時使用者寫的；可以空）
+    private(set) var chosenTopic: String?
+    /// v0.29.0：這場是非課程（按下錄音時定；錄音中按「當非課程送」也會設；續錄照原場還原）。不分人、開始前不提醒（那是討論會）
+    private(set) var sessionNonCourse = false
+    /// v0.29.0：這場的主題（每次送卡片、重查、重算都附在使用者訊息；錄音中可以改）
+    private(set) var sessionTopic: String?
+    /// v0.29.0：主題輸入框（錄音前＝下一場；錄音中＝這場）。掛在 HaikuSheets（最外層），不掛在選單裡
+    var askTopic = false
+    var topicDraft = ""
     /// 續錄時原場的改字紀錄
     @ObservationIgnored private var reviewBase: ReviewLog?
     /// 這次 transcribe 的定稿有沒有完整跑完（停止後補定稿命中要用）
@@ -412,9 +424,14 @@ final class AppModel {
             if let chosen = chosenCourse {
                 pendingCourse = CourseSchedule.shortName(chosen)
                 log("這場指定為「\(chosen)」", toRun: false)
+            } else if chosenNonCourse {
+                // v0.29.0：非課程：就算在上課時段也不照課表（檔名照時間、資料夾在最外層、不自動上傳）
+                pendingCourse = nil
+                log("這場指定為非課程（其他場合）", toRun: false)
             } else {
                 pendingCourse = CourseSchedule.course(at: Date())
             }
+            takeChosenNonCourse()
             chosenCourse = nil
             startRecording(to: nil)
         }
@@ -433,6 +450,7 @@ final class AppModel {
                 liveFixOff = []
                 reviewBase = nil
                 pendingCourse = chosenCourse.map(CourseSchedule.shortName)
+                takeChosenNonCourse()
                 chosenCourse = nil
                 simSource = copy
                 startRecording(to: nil)
@@ -462,6 +480,9 @@ final class AppModel {
         let basePieces = Store.loadPieces(of: base)
         // v0.23.2：原場的改字紀錄（已學規則、這場不再改的詞、最大單位編號）讀回來；黑名單改存在這裡，App 重開後續錄也還在
         reviewBase = Store.loadReview(of: base)
+        // v0.29.0：原場是非課程就照非課程接著送（主題也接著用）；場的 json 沒有就看改字紀錄
+        sessionNonCourse = base.nonCourse == true || reviewBase?.nonCourse == true
+        sessionTopic = sessionNonCourse ? SessionTopic.clean(base.topic ?? reviewBase?.topic) : nil
         liveFixOff.formUnion(reviewBase?.off ?? [])
         let lastEnd = basePieces.last(where: { $0.end >= 0 })?.end ?? 0
         // 上次錄到一半被殺時 audioSeconds 可能沒更新，所以和最後一個字的時間取大的
@@ -911,6 +932,9 @@ final class AppModel {
             next.log = sessionLog.isEmpty ? nil : sessionLog
             // v0.28.0：Apple 定稿再跑一次 beginRun 也留得住錄音中斷的紀錄
             next.gaps = sessionGaps.isEmpty ? nil : sessionGaps
+            // v0.29.0：非課程、主題（錄音中改過的也留得住）
+            next.nonCourse = sessionNonCourse ? true : nil
+            next.topic = sessionNonCourse ? sessionTopic : nil
             run = next
             return
         }
@@ -933,6 +957,8 @@ final class AppModel {
         fresh.partStamps = [fresh.recordedStamp ?? fresh.startedStamp]
         fresh.scene = sceneForRun
         fresh.gaps = sessionGaps.isEmpty ? nil : sessionGaps
+        fresh.nonCourse = sessionNonCourse ? true : nil
+        fresh.topic = sessionNonCourse ? sessionTopic : nil
         run = fresh
     }
 
@@ -959,6 +985,9 @@ final class AppModel {
         // 選來的檔照舊用原檔名當標題，不照課表
         pendingCourse = nil
         sceneForRun = nil
+        // v0.29.0：選來的檔不是非課程（上一場的不要帶過來）
+        sessionNonCourse = false
+        sessionTopic = nil
         player.unload()
         anchor = nil
         sessionLog = []
@@ -1644,14 +1673,20 @@ final class AppModel {
         let deck = formal.flatMap { SlideImport.latest(course: $0) }
         sessionSlides = deck?.name
         // v0.27.0 討論會：沒有課名也送（中性的課程區塊、沒有投影片）；有課名照課名的規則（私人課程照樣不送）
+        // v0.29.0 非課程（其他場合）：只在沒有課名時才算；用自己的中性區塊（不寫討論會、不分人、開始前不提醒）
         var neutral: String?
+        let nonCourse = formal == nil && sessionNonCourse
         if formal == nil {
-            guard sessionScene.allowsNoCourse else {
-                reviewOffReason = "沒有課名，點這行指定"
-                reviewNeedsCourse = true
-                return
+            if nonCourse {
+                neutral = RecordScene.nonCourseBlock
+            } else {
+                guard sessionScene.allowsNoCourse else {
+                    reviewOffReason = "沒有課名，點這行指定"
+                    reviewNeedsCourse = true
+                    return
+                }
+                neutral = RecordScene.neutralCourseBlock
             }
-            neutral = RecordScene.neutralCourseBlock
         }
         if let formal {
             guard CourseProfile.allowsUpload(course: formal) else {
@@ -1675,6 +1710,8 @@ final class AppModel {
             base: reviewBase,
             file: Store.reviewFile(of: current),
             courseBlock: neutral,
+            nonCourse: nonCourse,
+            topic: nonCourse ? sessionTopic : nil,
             clock: { [weak self] in self?.recordingSeconds ?? 0 },
             onEvent: { [weak self] line in self?.log(line) }
         )
@@ -1693,7 +1730,17 @@ final class AppModel {
         review.start()
         reviewer = review
         // 投影片檔名可能有人名，紀錄只寫頁數
-        log("Haiku 錄音中改字：開（\(formal ?? "討論會，沒有課名")，\(deck.map { "投影片 \($0.pages.count) 頁" } ?? "沒有投影片")，金鑰 \(HaikuKey.masked(key))）")
+        // v0.29.0：非課程寫非課程（主題只寫字數，不寫字）
+        let topicCount: Int = SessionTopic.clean(sessionTopic)?.count ?? 0
+        let label: String
+        if let formal {
+            label = formal
+        } else if nonCourse {
+            label = "非課程（其他場合），主題 \(topicCount) 字"
+        } else {
+            label = "討論會，沒有課名"
+        }
+        log("Haiku 錄音中改字：開（\(label)，\(deck.map { "投影片 \($0.pages.count) 頁" } ?? "沒有投影片")，金鑰 \(HaikuKey.masked(key))）")
     }
 
     /// 「這場是哪門課」（正式課名；nil＝照課表）。錄音前：下一場用（標題、資料夾、Haiku 都照它）；
@@ -1704,19 +1751,105 @@ final class AppModel {
             log("錄音中指定課名：\(formal)")
             startReviewer(course: formal)
             reviewCourseCache = nil
-            // v0.28.0：指定之前 Whisper 已經轉出的字（這一段）補交給審稿器，開頭的字才進得了卡片和逐字稿。
-            // 以前只交指定之後的新字，開頭那幾分鐘只在原文檔。pieces 在 append 時已經加過續錄位移，這裡不再加；只交一次（之後的新字走 appendLive）
-            if let review = reviewer, whisperMain, review.cardMode {
-                let earlier = Array(pieces.dropFirst(continuing?.basePieces.count ?? 0))
-                if earlier.contains(where: { !$0.text.isEmpty }) {
-                    review.addEarlier(earlier, offsetBefore: (continuing?.head ?? "").count, offsetAfter: run?.text.count ?? 0)
-                    log("錄音中指定課名：之前已轉出的 \(earlier.count) 小段補交給 Haiku")
-                }
-            }
+            backfillEarlier("錄音中指定課名")
             showBanner(reviewer == nil ? ReviewText.closed(reviewOffReason) : "這場的 Haiku 照「\(formal)」送")
         } else {
             chosenCourse = formal
+            // v0.29.0：選了課（或照課表）就不是非課程
+            chosenNonCourse = false
+            chosenTopic = nil
             showBanner(formal.map { "下一場：\($0)（標題、資料夾、Haiku 都照這門課）" } ?? "下一場照課表")
+        }
+    }
+
+    /// v0.28.0：錄音中才建審稿器時，之前 Whisper 已經轉出的字（這一段）補交給審稿器，開頭的字才進得了卡片和逐字稿。
+    /// 以前只交指定之後的新字，開頭那幾分鐘只在原文檔。pieces 在 append 時已經加過續錄位移，這裡不再加；只交一次（之後的新字走 appendLive）
+    /// v0.29.0：錄音中改成非課程也走這裡（why＝紀錄的開頭）
+    private func backfillEarlier(_ why: String) {
+        guard let review = reviewer, whisperMain, review.cardMode else { return }
+        let earlier = Array(pieces.dropFirst(continuing?.basePieces.count ?? 0))
+        if earlier.contains(where: { !$0.text.isEmpty }) {
+            review.addEarlier(earlier, offsetBefore: (continuing?.head ?? "").count, offsetAfter: run?.text.count ?? 0)
+            log("\(why)：之前已轉出的 \(earlier.count) 小段補交給 Haiku")
+        }
+    }
+
+    /// v0.29.0 按下錄音（或模擬上課）時用掉「下一場是非課程」：這場的非課程、主題照它定（指定了課就不是非課程）
+    private func takeChosenNonCourse() {
+        sessionNonCourse = chosenNonCourse && chosenCourse == nil
+        sessionTopic = sessionNonCourse ? SessionTopic.clean(chosenTopic) : nil
+        chosenNonCourse = false
+        chosenTopic = nil
+    }
+
+    /// v0.29.0「非課程（其他場合）」：course 照樣 nil（檔名未分類、資料夾在最外層、不自動上傳），Haiku 用非課程的中性區塊送（只有通用對照表、沒有投影片）。
+    /// 錄音前＝下一場；錄音中而且是因為沒課名才沒送＝這場改成非課程送，之前已轉出的字補交（和錄音中指定課名一樣）。之後跳主題輸入框
+    func assignNonCourse() {
+        if phase == .recording {
+            guard reviewer == nil, reviewNeedsCourse else { return }
+            sessionNonCourse = true
+            run?.nonCourse = true
+            log("錄音中改成非課程（其他場合）")
+            startReviewer(course: nil)
+            reviewCourseCache = nil
+            guard reviewer != nil else {
+                // 建不起來（例如沒有金鑰）：改回來，狀態列照樣可以點來指定課名
+                let reason = reviewOffReason
+                sessionNonCourse = false
+                run?.nonCourse = nil
+                reviewNeedsCourse = true
+                showBanner(ReviewText.closed(reason))
+                return
+            }
+            backfillEarlier("錄音中改成非課程")
+            showBanner("這場的 Haiku 照非課程送（不分人；檔名照時間、不自動上傳）")
+            topicDraft = sessionTopic ?? ""
+        } else {
+            chosenCourse = nil
+            chosenNonCourse = true
+            showBanner("下一場：非課程（其他場合）（檔名照時間、不自動上傳；Haiku 照非課程送）")
+            topicDraft = chosenTopic ?? ""
+        }
+        askTopic = true
+    }
+
+    /// v0.29.0：上課沒有課名（不在課表時段、也沒指定）而沒送時，狀態列問「這場當非課程送 Haiku？」。有金鑰才問；不按＝和以前一樣不送
+    var offersNonCourse: Bool {
+        phase == .recording && reviewer == nil && reviewNeedsCourse && haikuKeyLabel != nil
+    }
+
+    /// v0.29.0 Haiku 圓鈕選單「下一場是哪門課：…」
+    var nextCourseLabel: String {
+        if chosenNonCourse { return "非課程（其他場合）" }
+        return chosenCourse ?? "照課表"
+    }
+
+    /// v0.29.0 開始畫面：下一場是非課程時那一行
+    var nextNonCourseNote: String {
+        let topic: String = chosenTopic.map { (t: String) -> String in "，主題「" + t + "」" } ?? ""
+        return "下一場是非課程（其他場合）" + topic + "，錄音用時間命名、不自動上傳"
+    }
+
+    /// v0.29.0：改主題（錄音中＝這場；錄音前＝下一場）
+    func editTopic() {
+        topicDraft = (phase == .recording ? sessionTopic : chosenTopic) ?? ""
+        askTopic = true
+    }
+
+    /// v0.29.0：主題輸入框按「好」。錄音中：之後送的卡片、重查、重算都用新的（已經送出去的不重送）；紀錄只寫字數
+    func saveTopic() {
+        let cleaned = SessionTopic.clean(topicDraft)
+        if phase == .recording {
+            guard sessionNonCourse else { return }
+            sessionTopic = cleaned
+            run?.topic = cleaned
+            reviewer?.setTopic(cleaned)
+            log("主題改了（\(cleaned?.count ?? 0) 字）")
+            showBanner(cleaned.map { "主題：\($0)（之後送的卡片照這個）" } ?? "主題清空了")
+        } else {
+            guard chosenNonCourse else { return }
+            chosenTopic = cleaned
+            showBanner(cleaned.map { "下一場：非課程，主題「\($0)」" } ?? "下一場：非課程，沒寫主題")
         }
     }
 

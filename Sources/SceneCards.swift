@@ -72,6 +72,39 @@ enum RecordScene: String, CaseIterable, Codable {
     static let confirmTitle = "討論會的內容會送到 Claude Haiku 整理成重點卡。開始前請先告訴在場的人。"
     /// 討論會沒有課名時送的課程區塊（一場之內不變，快取照樣有效）
     static let neutralCourseBlock = "課名：（討論會，沒有課名）\n詞表（左＝稿裡常見的錯，右＝正確）：\n這堂沒有投影片。"
+    /// v0.29.0「非課程（其他場合）」送的課程區塊（一場之內不變；主題不放這裡，每次請求另外附在使用者訊息）。
+    /// 字裡保留「沒有課名」：提示詞照這幾個字判斷課名不用管
+    static let nonCourseBlock = "課名：（非課程，其他場合，沒有課名）\n詞表（左＝稿裡常見的錯，右＝正確）：\n這場沒有投影片。"
+
+    /// v0.29.0 沒課名時請求裡寫的課名：非課程／討論會
+    static func noCourseName(nonCourse: Bool) -> String {
+        nonCourse ? "（非課程，其他場合，沒有課名）" : "（討論會，沒有課名）"
+    }
+}
+
+// MARK: - v0.29.0 非課程的主題（使用者自己打的）
+
+/// 非課程（其他場合）時使用者打的主題（例：讀書會）。存進場的 json、稿頭「主題：…」；每次送卡片、重查、重算都附在使用者訊息
+/// （不放進有快取的課程區塊：錄音中改了，下一個請求就用新的）。
+enum SessionTopic {
+    /// 最多幾個字（太長的截掉）
+    static let maxLength = 40
+
+    /// 換行換成空白、去頭尾空白、截到 maxLength；空的＝nil
+    static func clean(_ text: String?) -> String? {
+        guard let text else { return nil }
+        let flat: String = text.components(separatedBy: CharacterSet.newlines).joined(separator: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return flat.isEmpty ? nil : String(flat.prefix(maxLength))
+    }
+
+    static let head = "使用者說這場的主題："
+
+    /// 卡片使用者訊息後面接的一段（沒有主題＝空字串）；接在改字對照、說明前面
+    static func promptBlock(_ topic: String?) -> String {
+        guard let topic = clean(topic) else { return "" }
+        return "\n\n" + head + topic + "（使用者自己寫的，當這場的背景和改字的證據；不要把這幾個字抄進 expanded）"
+    }
 }
 
 // MARK: - 使用者改的字、重查改的字
@@ -558,10 +591,12 @@ enum RecheckPrompt {
 
     /// 使用者訊息：課名（沒有就寫討論會）、這張卡的重點、圈起來的行（不送整份逐字稿）
     /// v0.28.0：重點是固定字樣（聽不清、現場口令）也當沒有重點
-    static func userMessage(course: String, key: String, lines: [String]) -> String {
-        let name = course.isEmpty ? "（討論會，沒有課名）" : course
+    /// v0.29.0：nonCourse＝非課程（沒課名時寫非課程，不寫討論會）；topic＝使用者寫的主題（有才多一行）
+    static func userMessage(course: String, key: String, lines: [String], nonCourse: Bool = false, topic: String? = nil) -> String {
+        let name = course.isEmpty ? RecordScene.noCourseName(nonCourse: nonCourse) : course
         let point = key.isEmpty || CardText.isPlaceholderKey(key) ? "（還沒有）" : key
-        return "課名：\(name)\n這段的重點：\(point)\n\n圈起來的逐字稿（一行一句）：\n" + lines.joined(separator: "\n")
+        let topicLine: String = SessionTopic.clean(topic).map { (t: String) -> String in "主題（使用者自己寫的）：" + t + "\n" } ?? ""
+        return "課名：\(name)\n" + topicLine + "這段的重點：\(point)\n\n圈起來的逐字稿（一行一句）：\n" + lines.joined(separator: "\n")
     }
 
     /// 請求內容（JSONSerialization 編，pause_turn 時把上一段回應的 content 原封不動放成 assistant）
@@ -820,7 +855,7 @@ enum CardRefresh {
     你在幫一位學生更新上課筆記的一張卡。這張卡的逐字稿剛被修正過（使用者改了字、或查證後改了字），請照修正後的逐字稿重寫這張卡的重點（key）和整理版（tidy），回一個 JSON：{"key": "…", "tidy": "…"}。
     逐字稿是準的。重點和整理版不得和逐字稿矛盾：原本的重點、整理版只是參考，和逐字稿不合的地方一律照逐字稿改（例如逐字稿說「不是某某」，就不能寫成「是某某」）。
     講話的人不一定是老師：可能是學長姐、助教、上台報告的同學或來賓。看不出是誰就寫「講者」或不寫主詞，不要一律寫「老師」。
-    課名是使用者自己選的（寫「沒有課名」就不管）。這堂的主題以課名為準，不要因為稿裡某個詞、或使用者改過的某個字，就改判成別的主題。
+    課名是使用者自己選的（寫「沒有課名」就不管）。這堂的主題以課名為準，不要因為稿裡某個詞、或使用者改過的某個字，就改判成別的主題。非課程的場合有「這場的主題」時，主題以它為準。
     「使用者的說明」是使用者給你的話：照著做（你這裡不能上網查，查不到就不要假裝查過），但不要把說明的字抄進 key、tidy。
     tidy：2–4 句通順中文，只寫講者真的講到的。整段聽不清，或只是現場口令（喊口號、拍照、點名）、雜聲，就只寫（這段聽不清）或（現場口令），不要編成像真的內容。只有一部分是這樣：只整理有內容的部分。
     key：一句重點，15 字內，只寫這段真的講到的內容。整段聽不清，或只是現場口令、雜聲，key 就寫（這段聽不清）或（現場口令），不要從口令或雜聲編出重點。
@@ -829,13 +864,16 @@ enum CardRefresh {
     static let schemaText = #"{"type":"object","additionalProperties":false,"required":["key","tidy"],"properties":{"key":{"type":"string"},"tidy":{"type":"string"}}}"#
 
     /// 放在 system 第二段的課名（很短，不會真的快取）；沒課名寫討論會
-    static func courseBlock(course: String) -> String {
-        "課名：" + (course.isEmpty ? "（討論會，沒有課名）" : course)
+    /// v0.29.0：nonCourse＝非課程（沒課名時寫非課程）
+    static func courseBlock(course: String, nonCourse: Bool = false) -> String {
+        "課名：" + (course.isEmpty ? RecordScene.noCourseName(nonCourse: nonCourse) : course)
     }
 
     /// 使用者訊息：改好的逐字稿（一句一行）、使用者的說明（有才放）、原本的重點和整理版（固定字樣照寫，讓它知道原本是聽不清）
-    static func userMessage(transcript: [String], notes: [String], key: String, tidy: String) -> String {
-        var text = "這張卡修正後的逐字稿（一句一行，這是準的）：\n" + transcript.joined(separator: "\n")
+    /// v0.29.0：topic＝非課程時使用者寫的主題（有才放在最前面；主題錄音中可以改，所以不放 system）
+    static func userMessage(transcript: [String], notes: [String], key: String, tidy: String, topic: String? = nil) -> String {
+        var text: String = SessionTopic.clean(topic).map { (t: String) -> String in "這場的主題（使用者自己寫的）：" + t + "\n\n" } ?? ""
+        text += "這張卡修正後的逐字稿（一句一行，這是準的）：\n" + transcript.joined(separator: "\n")
         if !notes.isEmpty {
             text += "\n\n使用者的說明（照著做，但不要抄進 key、tidy）：\n" + notes.joined(separator: "\n")
         }

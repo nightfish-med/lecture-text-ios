@@ -185,6 +185,9 @@ private struct StartView: View {
             // v0.23.2：在 Haiku 圓鈕指定了下一場是哪門課
             if let chosen = model.chosenCourse {
                 Text("下一場指定為「\(chosen)」，錄音會叫「\(CourseSchedule.title(stamp: Store.timestamp(), course: CourseSchedule.shortName(chosen)))」")
+            } else if model.chosenNonCourse {
+                // v0.29.0：非課程：錄音用時間命名（未分類）、不自動上傳
+                Text(model.nextNonCourseNote)
             } else {
                 // v0.14：上課時段按錄音會照課表命名，先讓他看到會叫什麼
                 TimelineView(.periodic(from: .now, by: 30)) { context in

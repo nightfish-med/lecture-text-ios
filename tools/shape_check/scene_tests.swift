@@ -356,6 +356,32 @@ private func v28Tests(_ check: @escaping (String, String, String) -> Void) {
     check(refreshMissing.joined(separator: "、"), "", "重算提示詞：逐字稿為準、不得矛盾、其餘規則和卡片一樣")
     let courseBlocks: String = CardRefresh.courseBlock(course: "") + "/" + CardRefresh.courseBlock(course: "解析幾何")
     check(courseBlocks, "課名：（討論會，沒有課名）/課名：解析幾何", "重算課名：沒課名寫討論會")
+
+    // ---- v0.29.0 非課程（其他場合）、使用者寫的主題
+    let nonCourseRefresh: String = CardRefresh.courseBlock(course: "", nonCourse: true)
+    check(nonCourseRefresh, "課名：（非課程，其他場合，沒有課名）", "非課程：重算課名寫非課程、不寫討論會")
+    let nonCourseRecheck: String = RecheckPrompt.userMessage(course: "", key: "", lines: ["甲句"], nonCourse: true, topic: "社團分享會")
+    let nonCourseRecheckOK: Bool = nonCourseRecheck.hasPrefix("課名：（非課程，其他場合，沒有課名）\n主題（使用者自己寫的）：社團分享會\n這段的重點：")
+        && !nonCourseRecheck.contains("討論會")
+    check(nonCourseRecheckOK ? "對" : nonCourseRecheck, "對", "非課程：重查訊息寫非課程、多一行主題")
+    let nonCourseBlockOK: Bool = RecordScene.nonCourseBlock.contains("沒有課名") && !RecordScene.nonCourseBlock.contains("討論會")
+    check(nonCourseBlockOK ? "對" : RecordScene.nonCourseBlock, "對", "非課程：課程區塊留「沒有課名」、不寫討論會")
+    let topicA: String = SessionTopic.clean("  社團\n分享會 ") ?? "nil"
+    let topicB: String = SessionTopic.clean(" \n ") ?? "nil"
+    let topicC: String = SessionTopic.clean(nil) ?? "nil"
+    let topicD: Int = SessionTopic.clean(String(repeating: "甲", count: 50))?.count ?? 0
+    check([topicA, topicB, topicC, String(topicD)].joined(separator: "|"), "社團 分享會|nil|nil|40", "主題：換行變空白、空的算沒寫、最多 40 字")
+    let topicBlock: String = SessionTopic.promptBlock("社團分享會")
+    check(topicBlock.hasPrefix("\n\n使用者說這場的主題：社團分享會") ? "對" : topicBlock, "對", "主題：卡片訊息多一段")
+    check(SessionTopic.promptBlock("  "), "", "主題：沒寫就不放")
+    let topicCardMessage: String = CardPrompt.userMessage(context: "", raw: "這段", reference: "", referenceName: "Apple",
+                                                          userEdits: SessionTopic.promptBlock("社團分享會"))
+    check(topicCardMessage.hasSuffix("不要把這幾個字抄進 expanded）") ? "對" : topicCardMessage, "對", "主題：接在卡片使用者訊息最後（不進課程區塊）")
+    let topicRefresh: String = CardRefresh.userMessage(transcript: ["甲。"], notes: [], key: "", tidy: "", topic: "社團分享會")
+    check(topicRefresh.hasPrefix("這場的主題（使用者自己寫的）：社團分享會\n\n這張卡修正後的逐字稿") ? "對" : topicRefresh, "對", "主題：重算訊息放最前面")
+    let topicPromptWords: [String] = ["使用者說這場的主題", "主題以它為準", "使用者說的主題，或上下文"]
+    let topicPromptMissing: [String] = topicPromptWords.filter { (word: String) -> Bool in !CardPrompt.system.contains(word) }
+    check(topicPromptMissing.joined(separator: "、"), "", "主題：卡片提示詞講明非課程以主題為準、主題算改字的證據")
     if let body = try? CardRefresh.requestBody(courseBlock: "課名：解析幾何", userMessage: "稿"),
        let object = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any] {
         let config: [String: Any] = object["output_config"] as? [String: Any] ?? [:]

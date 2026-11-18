@@ -762,78 +762,106 @@ final class LiveReviewer {
     }
 
     private func runRecheck(cardID: Int, recheckID: Int, message: String) async {
+        let result = await runWebSearch(system: RecheckPrompt.system, message: message, label: "重查", keepTrying: true,
+                                        onNote: { (note: String) in self.updateRecheck(cardID, recheckID) { $0.note = note } },
+                                        onCost: { (usd: Double) in self.addRecheckCost(cardID, usd: usd) })
+        if result.cancelled { return }
+        if let failure = result.failure {
+            failRecheck(cardID, recheckID, note: failure)
+            return
+        }
+        let all = result.content
+        guard let reply = RecheckReply.parse(RecheckPrompt.text(all)) else {
+            let error = RecheckPrompt.searchError(all).map { "（搜尋：\($0)）" } ?? ""
+            failRecheck(cardID, recheckID, note: "回覆裡沒有規定的 JSON" + error)
+            return
+        }
+        // v0.28.0：來源只列 Haiku 說支持結論的（舊格式只用引用），不再列全部搜尋結果
+        finishRecheck(cardID, recheckID, reply: reply, sources: RecheckPrompt.sources(all, keep: reply.sources), cost: result.cost, searches: result.searches)
+    }
+
+    /// v0.29.1 上網查的那一段（Pencil 重查和參照詞搜尋共用一份：請求、pause_turn 接著送、重試、花費）。
+    /// keepTrying：true＝網路錯照卡片的規則錄音中一直等（重查）；false＝網路錯（含沒網路）重試用完就算失敗（參照詞搜尋，不卡住排在後面的重查）。
+    /// 429／5xx 兩邊都照 ReviewRetry.after。4xx 不算進卡片的「連續 400」、不停用這場（例如帳戶沒開網路搜尋）。
+    /// onNote：等待中的一句（畫面）；onCost：每段回應的花費（呼叫的人決定算進哪裡）。
+    private func runWebSearch(system: String, message: String, label: String, keepTrying: Bool,
+                              onNote: (String) -> Void, onCost: (Double) -> Void) async -> WebSearchResult {
         let apiKey = key
         var assistant: [Any] = []
         var continuations = 0
         var attempts = 0
-        var cost = 0.0
-        var searches = 0
+        var result = WebSearchResult()
         while !closed, !wrapped {
-            let body = try? RecheckPrompt.body(userMessage: message, assistant: assistant)
+            let body = try? RecheckPrompt.body(userMessage: message, assistant: assistant, system: system)
             guard let body else {
-                failRecheck(cardID, recheckID, note: "請求內容編不出來")
-                return
+                result.failure = "請求內容編不出來"
+                return result
             }
             let outcome = await Task.detached { () -> HaikuOutcome in
                 await HaikuClient.send(body: body, key: apiKey, session: HaikuClient.cardSession, timeout: HaikuClient.cardTimeout)
             }.value
-            guard !closed, !wrapped else { return }
+            guard !closed, !wrapped else {
+                result.cancelled = true
+                return result
+            }
             switch outcome {
             case .failure(let text, let offline):
                 if !offline { attempts += 1 }
-                let step = ReviewRetry.afterNetworkErrorCards(offline: offline, attempts: attempts)
-                updateRecheck(cardID, recheckID) { $0.note = "網路不通，等一下再查" }
-                onEvent("重查：\(text)")
+                let step: ReviewRetry.Step
+                if keepTrying {
+                    step = ReviewRetry.afterNetworkErrorCards(offline: offline, attempts: attempts)
+                } else if offline {
+                    step = .giveUp
+                } else {
+                    step = ReviewRetry.afterNetworkError(offline: false, attempts: attempts)
+                }
+                onNote("網路不通，等一下再查")
+                onEvent("\(label)：\(text)")
                 if case .retry(let after) = step {
                     try? await Task.sleep(for: .seconds(after))
                     continue
                 }
-                failRecheck(cardID, recheckID, note: "網路不通，沒查到")
-                return
+                result.failure = "網路不通，沒查到"
+                return result
             case .response(let data, let status, _, let retryAfter):
                 attempts += 1
                 let step = ReviewRetry.after(status: status, attempts: attempts, retryAfter: retryAfter)
                 if case .retry(let after) = step {
-                    updateRecheck(cardID, recheckID) { $0.note = "Anthropic 忙，等一下再查" }
+                    onNote("Anthropic 忙，等一下再查")
                     try? await Task.sleep(for: .seconds(after))
                     continue
                 }
                 guard step == .parse else {
-                    // 重查的 4xx 不算進卡片的「連續 400」、不停用這場（例如帳戶沒開網路搜尋）
                     let reason = HaikuClient.errorText(data, status: status)
-                    onEvent("重查沒成功：\(reason)")
-                    failRecheck(cardID, recheckID, note: "沒查到（\(reason)）")
-                    return
+                    onEvent("\(label)沒成功：\(reason)")
+                    result.failure = "沒查到（\(reason)）"
+                    return result
                 }
                 guard let response = RecheckPrompt.parse(data) else {
-                    failRecheck(cardID, recheckID, note: "回應不是預期的格式")
-                    return
+                    result.failure = "回應不是預期的格式"
+                    return result
                 }
                 let usd = RecheckPrompt.cost(usage: response.usage, searches: response.searches)
-                cost += usd
-                searches += response.searches
-                addRecheckCost(cardID, usd: usd)
+                result.answered = true
+                result.cost += usd
+                result.searches += response.searches
+                onCost(usd)
                 if response.stopReason == "pause_turn", continuations < RecheckPrompt.maxContinuations {
                     // 搜尋還沒做完：把這段回應原封不動接在 assistant 後面再送一次（不加「繼續」）
                     continuations += 1
                     assistant += response.content
                     continue
                 }
-                let all = assistant + response.content
                 if response.stopReason == "refusal" {
-                    failRecheck(cardID, recheckID, note: "Haiku 拒絕這次重查")
-                    return
+                    result.failure = "Haiku 拒絕這次" + label
+                    return result
                 }
-                guard let reply = RecheckReply.parse(RecheckPrompt.text(all)) else {
-                    let error = RecheckPrompt.searchError(all).map { "（搜尋：\($0)）" } ?? ""
-                    failRecheck(cardID, recheckID, note: "回覆裡沒有規定的 JSON" + error)
-                    return
-                }
-                // v0.28.0：來源只列 Haiku 說支持結論的（舊格式只用引用），不再列全部搜尋結果
-                finishRecheck(cardID, recheckID, reply: reply, sources: RecheckPrompt.sources(all, keep: reply.sources), cost: cost, searches: searches)
-                return
+                result.content = assistant + response.content
+                return result
             }
         }
+        result.cancelled = true
+        return result
     }
 
     private func updateRecheck(_ cardID: Int, _ recheckID: Int, _ change: (inout CardRecheck) -> Void) {
@@ -1248,6 +1276,17 @@ final class LiveReviewer {
     func waitForSaves() async {
         await saving?.value
     }
+}
+
+/// v0.29.1 上網查一次的結果（重查、參照詞搜尋共用）。failure＝失敗的原因（給畫面和紀錄，不含稿的字）；
+/// cancelled＝停止收尾了（不寫失敗）；answered＝有拿到 200 的回應（花了錢）；content＝全部回應（含 pause_turn 前的）
+private struct WebSearchResult {
+    var content: [Any] = []
+    var cost = 0.0
+    var searches = 0
+    var answered = false
+    var failure: String? = nil
+    var cancelled = false
 }
 
 /// v0.26.0 卡片背景解析的結果（放在類別外面：不跟著 MainActor）

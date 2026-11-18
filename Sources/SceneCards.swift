@@ -540,14 +540,21 @@ struct RecheckReply: Equatable {
 
     /// 從全部文字裡找最後一個讀得出來、有 conclusion 或 fixes 的 JSON 物件（前面可以有說明字、```json）
     static func parse(_ text: String) -> RecheckReply? {
+        guard let object = lastObject(text, keys: ["conclusion", "fixes"]) else { return nil }
+        return make(object)
+    }
+
+    /// v0.29.1（重查、參照詞搜尋共用）：從全部文字裡找最後一個讀得出來、至少有 keys 其中一個鍵的 JSON 物件
+    static func lastObject(_ text: String, keys: [String]) -> [String: Any]? {
         let chars = Array(text)
         let opens = chars.indices.filter { chars[$0] == "{" }
         for start in opens.reversed() {
             guard let end = balancedEnd(chars, from: start) else { continue }
             let body = String(chars[start...end])
-            guard let object = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any],
-                  object["conclusion"] != nil || object["fixes"] != nil else { continue }
-            return make(object)
+            guard let object = (try? JSONSerialization.jsonObject(with: Data(body.utf8))) as? [String: Any] else { continue }
+            if keys.contains(where: { (k: String) -> Bool in object[k] != nil }) {
+                return object
+            }
         }
         return nil
     }
@@ -662,7 +669,8 @@ enum RecheckPrompt {
     }
 
     /// 請求內容（JSONSerialization 編，pause_turn 時把上一段回應的 content 原封不動放成 assistant）
-    static func body(userMessage: String, assistant: [Any]?) throws -> Data {
+    /// v0.29.1：system 可換（參照詞搜尋用同一份請求，只換提示詞）
+    static func body(userMessage: String, assistant: [Any]?, system: String = RecheckPrompt.system) throws -> Data {
         var messages: [[String: Any]] = [["role": "user", "content": userMessage]]
         if let assistant, !assistant.isEmpty {
             messages.append(["role": "assistant", "content": assistant])
